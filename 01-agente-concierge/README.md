@@ -190,7 +190,7 @@ O código do painel fica num repositório privado.
 
 **O Concierge em 79 segundos (sem áudio).** Uma conversa no WhatsApp e, depois, a equipe usando o painel: login, pedidos, uma mensagem nova para aprovação da Meta, uma campanha, o consumo do mês e as configurações do agente. O painel está em modo demonstração, com dados fictícios.
 
-<!-- VÍDEO: no github.com, edite este arquivo, apague esta linha inteira e arraste aqui o arquivo voga-concierge-github.mp4. O GitHub troca pelo link do vídeo e mostra o player. -->
+/Users/matheustavaresramos/Documents/mcp-n8n/video-voga/out/voga-concierge-github.mp4
 
 <!-- TODO: print do canvas do n8n (assets/canvas.png). -->
 
