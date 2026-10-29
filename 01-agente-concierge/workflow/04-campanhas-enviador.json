@@ -1,0 +1,465 @@
+{
+  "name": "Campanhas · Enviador",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 2
+            }
+          ]
+        }
+      },
+      "id": "12a5e12f-15b8-4030-8383-ef73d98c42e5",
+      "name": "A cada 2 minutos",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH taxa AS (\n  SELECT campanha_id,\n         count(*) FILTER (WHERE enviado_em > now() - interval '60 minutes') AS enviados,\n         count(*) FILTER (WHERE status = 'falhou') AS falhas\n  FROM disparos\n  WHERE atualizado_em > now() - interval '60 minutes'\n  GROUP BY campanha_id\n), pausadas AS (\n  UPDATE campanhas c\n  SET status = 'pausada', atualizado_em = now(),\n      observacao = 'Pausada automaticamente em ' || to_char(now() AT TIME ZONE 'America/Sao_Paulo', 'DD/MM/YYYY HH24:MI') || ': ' || t.falhas || ' falhas em ' || t.enviados || ' envios na última hora.'\n  FROM taxa t\n  WHERE c.id = t.campanha_id AND c.status = 'em_andamento' AND t.enviados >= 10 AND t.falhas * 10 >= t.enviados * 3\n  RETURNING c.id, c.titulo, c.observacao\n), travados AS (\n  UPDATE disparos SET status = 'revisar', atualizado_em = now()\n  WHERE status = 'enviando' AND atualizado_em < now() - interval '30 minutes'\n  RETURNING id\n), aniversarios_vencidos AS (\n  -- O modelo diz \"Hoje\": o aniversário que não saiu no dia agendado (horário de Brasília) é cancelado.\n  UPDATE disparos d SET status = 'cancelado', erro_detalhe = 'O aniversário passou sem envio.', atualizado_em = now()\n  FROM campanhas c\n  WHERE c.id = d.campanha_id AND c.tipo = 'aniversario' AND d.status = 'pendente'\n    AND (d.agendado_para AT TIME ZONE 'America/Sao_Paulo')::date < (now() AT TIME ZONE 'America/Sao_Paulo')::date\n  RETURNING d.id\n), concluidas AS (\n  UPDATE campanhas c SET status = 'concluida', atualizado_em = now()\n  WHERE c.status = 'em_andamento' AND c.tipo <> 'aniversario' AND c.criado_em < now() - interval '10 minutes'\n    AND NOT EXISTS (SELECT 1 FROM disparos d WHERE d.campanha_id = c.id AND d.status IN ('pendente', 'enviando'))\n  RETURNING c.id\n)\nSELECT (SELECT json_agg(p) FROM pausadas p) AS pausadas,\n       (SELECT count(*) FROM travados)::int AS travados,\n       (SELECT count(*) FROM aniversarios_vencidos)::int AS aniversarios_vencidos,\n       (SELECT count(*) FROM concluidas)::int AS concluidas;",
+        "options": {}
+      },
+      "id": "762d1a52-0d71-4676-a8df-709ac4cb3535",
+      "name": "Freio e manutenção",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH cfg AS (\n  SELECT * FROM config_disparos WHERE id = 1\n), agora AS (\n  SELECT now() AT TIME ZONE 'America/Sao_Paulo' AS local\n), janela AS (\n  SELECT\n    (EXTRACT(ISODOW FROM a.local)::int = ANY (cfg.janela_aniversario_dias)\n      AND a.local::time >= cfg.janela_aniversario_inicio AND a.local::time < cfg.janela_aniversario_fim) AS aniversario,\n    (EXTRACT(ISODOW FROM a.local)::int = ANY (cfg.janela_beneficio_dias)\n      AND a.local::time >= cfg.janela_beneficio_inicio AND a.local::time < cfg.janela_beneficio_fim\n      AND NOT EXISTS (SELECT 1 FROM feriados f WHERE f.data = a.local::date)) AS beneficio\n  FROM cfg CROSS JOIN agora a\n), hoje AS (\n  SELECT count(*)::int AS enviados FROM disparos\n  WHERE enviado_em >= (date_trunc('day', now() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')\n), preco AS (\n  -- Preço de uma mensagem de marketing: a média real da conta nos últimos 90 dias ou, sem histórico,\n  -- a tabela da Meta para o Brasil (R$ 0,3217, desde 01/10/2026). O painel usa a mesma conta.\n  SELECT coalesce(nullif(sum(custo) / nullif(sum(volume), 0), 0), 0.3217) AS valor\n  FROM meta_consumo WHERE categoria LIKE 'MARKETING%' AND tipo = 'REGULAR' AND dia >= current_date - 90\n), gasto AS (\n  -- Gasto estimado do mês (de Brasília). Por dia: o que a Meta cobrou fora do marketing, mais o maior valor entre\n  -- o marketing que ela informou e as campanhas enviadas pelo preço acima. A Meta informa com horas de atraso:\n  -- assim, o que saiu depois da última leitura já conta. O painel (telas Consumo, Envios e Nova campanha) faz a mesma conta.\n  SELECT coalesce(sum(coalesce(m.fora, 0) + greatest(coalesce(m.marketing, 0), coalesce(e.enviados, 0) * p.valor)), 0) AS estimado\n  FROM (\n    SELECT dia,\n           sum(custo) FILTER (WHERE categoria NOT LIKE 'MARKETING%') AS fora,\n           sum(custo) FILTER (WHERE categoria LIKE 'MARKETING%') AS marketing\n    FROM meta_consumo\n    WHERE dia >= date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo')::date\n    GROUP BY dia\n  ) m\n  FULL JOIN (\n    SELECT (enviado_em AT TIME ZONE 'America/Sao_Paulo')::date AS dia, count(*) AS enviados\n    FROM disparos\n    WHERE enviado_em >= (date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')\n      AND status <> 'falhou'\n    GROUP BY 1\n  ) e ON e.dia = m.dia\n  CROSS JOIN preco p\n), orcamento AS (\n  -- Limite de gasto do mês (tela Consumo): quantas mensagens de campanha ainda cabem. Sem limite, fica NULL.\n  SELECT CASE WHEN cfg.orcamento_meta_mensal > 0\n              THEN greatest(0, floor((cfg.orcamento_meta_mensal - g.estimado) / p.valor))::int END AS vagas,\n         cfg.orcamento_meta_mensal AS limite, g.estimado\n  FROM cfg CROSS JOIN gasto g CROSS JOIN preco p\n), testes AS (\n  SELECT count(*)::int AS pendentes\n  FROM disparos d JOIN campanhas c ON c.id = d.campanha_id\n  WHERE c.teste AND c.status = 'em_andamento' AND d.status = 'pendente' AND d.agendado_para <= now()\n), lote AS (\n  SELECT d.id\n  FROM disparos d\n  JOIN campanhas c ON c.id = d.campanha_id\n  CROSS JOIN cfg CROSS JOIN janela j CROSS JOIN orcamento o\n  WHERE cfg.disparos_ativos AND d.status = 'pendente' AND d.agendado_para <= now() AND c.status = 'em_andamento'\n    -- Benefício, lançamento e as campanhas do painel saem na janela de benefício.\n    AND (c.teste OR (c.tipo = 'aniversario' AND j.aniversario) OR (c.tipo <> 'aniversario' AND j.beneficio))\n    -- No limite de gasto, as campanhas (inclusive os aniversários) param. Os testes da equipe continuam.\n    AND (c.teste OR o.vagas IS NULL OR o.vagas > 0)\n  -- Teste primeiro; depois aniversário, que tem dia certo e não pode esperar uma campanha grande; depois o resto.\n  ORDER BY c.teste DESC, (c.tipo = 'aniversario') DESC, d.agendado_para, d.id\n  LIMIT (SELECT GREATEST(0, LEAST(cfg.por_rodada, cfg.limite_diario - hoje.enviados, coalesce(o.vagas + t.pendentes, cfg.por_rodada)))\n         FROM cfg CROSS JOIN hoje CROSS JOIN orcamento o CROSS JOIN testes t)\n  FOR UPDATE OF d SKIP LOCKED\n), alerta AS (\n  -- Campanhas paradas pelo limite: um alerta por mês e por valor do limite.\n  INSERT INTO alertas (chave, tipo, gravidade, area, titulo, mensagem, acao_sugerida, workflow, no)\n  SELECT 'limite-gasto-campanhas-' || to_char(now() AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM') || '-' || o.limite::text,\n         'limite_gasto', 'critico', 'envios',\n         'Campanhas paradas: o gasto do mês chegou ao limite',\n         'Gasto estimado no mês: R$ ' || replace(to_char(o.estimado, 'FM999999990.00'), '.', ',') || ' de R$ '\n           || replace(to_char(o.limite, 'FM999999990.00'), '.', ',')\n           || '. As campanhas, inclusive os aniversários, ficam na fila. As respostas do Concierge continuam.',\n         'Para continuar agora, aumente o limite na tela Consumo. Sem isso, as campanhas voltam a sair no dia 1º do mês seguinte; cancele na tela Envios as que não fizerem mais sentido.',\n         'Campanhas · Enviador', 'Reservar lote'\n  FROM orcamento o CROSS JOIN cfg\n  WHERE o.vagas = 0 AND cfg.disparos_ativos AND EXISTS (\n    SELECT 1 FROM disparos d JOIN campanhas c ON c.id = d.campanha_id\n    WHERE NOT c.teste AND c.status = 'em_andamento' AND d.status = 'pendente' AND d.agendado_para <= now()\n  )\n  ON CONFLICT (chave) DO NOTHING\n)\nUPDATE disparos d\nSET status = 'enviando', tentativas = d.tentativas + 1, atualizado_em = now()\nFROM lote l\nWHERE d.id = l.id\nRETURNING d.id;",
+        "options": {}
+      },
+      "id": "101a321c-cdaf-4a61-a8c6-04fccc7b1068",
+      "name": "Reservar lote",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        448,
+        0
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Só segue (para o alerta) se alguma campanha foi pausada por erro de modelo ou de conta nesta rodada.\nconst pausadas = $input.all().flatMap((i) => Array.isArray(i.json.campanha_pausada) ? i.json.campanha_pausada : []);\nif (!pausadas.length) return [];\nreturn [{ json: {\n  mensagem: 'O enviador pausou ' + (pausadas.length > 1 ? 'as campanhas' : 'a campanha') + ' '\n    + pausadas.map((p) => '#' + p.id + ' \"' + p.titulo + '\" (' + p.observacao + ')').join('; ')\n    + '. Os disparos voltaram para a fila. Corrija o problema e retome com: update campanhas set status = \\'em_andamento\\' where id = <id>.',\n} }];"
+      },
+      "id": "c9656a1c-0326-4b32-a9a0-376692c30859",
+      "name": "Resumo da rodada",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ $json.mensagem }}"
+      },
+      "id": "1f699b1e-d541-4d8f-b8a5-c4be5f00f956",
+      "name": "Alertar campanha pausada",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT p.id, d.telefone, d.variaveis, d.tentativas, c.modelo_nome, c.modelo_idioma, c.teste,\n       cfg.phone_number_id, cfg.pausa_min_seg, cfg.pausa_max_seg,\n       CASE\n         WHEN d.id IS NULL THEN 'ignorar'\n         WHEN NOT cfg.disparos_ativos OR c.status <> 'em_andamento' THEN 'devolver'\n         WHEN NOT c.teste AND EXISTS (SELECT 1 FROM comunicacao_atual ca WHERE ca.chave IN (d.cliente_id, d.telefone) AND ca.situacao = 'optout') THEN 'optout'\n         WHEN cfg.modo_teste AND NOT c.teste AND NOT (d.telefone = ANY (cfg.telefones_teste)) THEN 'simulado'\n         ELSE 'enviar'\n       END AS acao\nFROM (SELECT $1::bigint AS id) p\nLEFT JOIN disparos d ON d.id = p.id\nLEFT JOIN campanhas c ON c.id = d.campanha_id\nLEFT JOIN config_disparos cfg ON cfg.id = 1;",
+        "options": {
+          "queryReplacement": "={{ [$json.id] }}"
+        }
+      },
+      "id": "92fd0577-c939-4bd1-b6b1-9bbd255b9c46",
+      "name": "Conferir antes de enviar",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        896,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst linha = (s) => String(s ?? '').replace(/\\s+/g, ' ').trim();\nconst min = Number(d.pausa_min_seg) || 5;\nconst max = Math.max(min, Number(d.pausa_max_seg) || 20);\nconst base = { id: d.id, acao: d.acao, tentativas: Number(d.tentativas) || 0, wamid: '', wa_id: '', erro_codigo: '', erro_detalhe: '', devolver: false, pausar: false, pausa: 1 };\n\nif (d.acao === 'enviar') {\n  let variaveis = d.variaveis;\n  if (typeof variaveis === 'string') { try { variaveis = JSON.parse(variaveis); } catch (e) { variaveis = []; } }\n  // Parâmetro de modelo da Meta não aceita quebra de linha nem valor vazio.\n  const parametros = (Array.isArray(variaveis) ? variaveis : []).map((v) => ({ type: 'text', text: linha(v).slice(0, 1000) || '-' }));\n  return [{ json: {\n    ...base,\n    status: 'enviando',\n    pausa: min + Math.floor(Math.random() * (max - min + 1)),\n    phone_number_id: String(d.phone_number_id),\n    corpo: {\n      messaging_product: 'whatsapp',\n      recipient_type: 'individual',\n      to: String(d.telefone).replace(/\\D/g, ''),\n      type: 'template',\n      template: {\n        name: d.modelo_nome,\n        language: { code: d.modelo_idioma || 'pt_BR' },\n        components: parametros.length ? [{ type: 'body', parameters: parametros }] : [],\n      },\n    },\n  } }];\n}\n\nconst resultados = {\n  optout: { status: 'cancelado', erro_detalhe: 'O cliente pediu para não receber mensagens de campanha.' },\n  simulado: { status: 'simulado', erro_detalhe: 'Modo teste: telefone fora da lista de teste.' },\n  devolver: { status: 'pendente', devolver: true },\n  ignorar: { status: 'falhou', erro_detalhe: 'Disparo não encontrado.' },\n};\nreturn [{ json: { ...base, ...(resultados[d.acao] || resultados.ignorar) } }];"
+      },
+      "id": "6145863b-b4a9-4ed6-9777-4382092ec45c",
+      "name": "Preparar envio",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.acao === \"enviar\" }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "id": "aabc556f-ab00-4bef-b8fa-987fd792919b"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a7323392-4fed-4500-b42a-8e94aa24b7f5",
+      "name": "Enviar agora?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1344,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v25.0/{{ $json.phone_number_id }}/messages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "whatsAppApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.corpo) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "02f9f370-9a83-40bb-9b00-c6a3ecec1fb9",
+      "name": "Enviar modelo (WhatsApp)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1568,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const prep = $('Preparar envio').first().json;\nconst r = $input.first().json;\nconst statusHttp = Number(r.statusCode || 0);\nlet corpo = r.body;\nif (typeof corpo === 'string') { try { corpo = JSON.parse(corpo); } catch (e) { corpo = {}; } }\ncorpo = corpo || {};\nconst wamid = corpo.messages?.[0]?.id || '';\nconst base = { id: prep.id, pausa: prep.pausa, wamid: '', wa_id: '', erro_codigo: '', erro_detalhe: '', devolver: false, pausar: false };\n\nif (statusHttp >= 200 && statusHttp < 300 && wamid) {\n  return [{ json: { ...base, status: 'enviado', wamid, wa_id: String(corpo.contacts?.[0]?.wa_id || '') } }];\n}\n\nconst erro = corpo.error || {};\nconst codigo = String(erro.code ?? (statusHttp || 'rede'));\nconst detalhe = [erro.error_user_title || erro.message, erro.error_data?.details || erro.error_user_msg].filter(Boolean).join(' – ')\n  || String(r.error?.message || r.message || 'Sem resposta da Meta');\n// Problema de configuração (modelo, token, conta, pagamento): devolve à fila sem gastar tentativa e pausa a campanha.\nconst CONFIGURACAO = ['10', '190', '200', '131005', '131008', '131031', '131042', '133010'];\n// Instabilidade ou limite de ritmo: tenta de novo em 15 min, até 3 vezes.\nconst TRANSITORIO = ['1', '2', '4', '80007', '130429', '131000', '131016', '131048', '131056'];\nconst configuracao = /^132\\d{3}$/.test(codigo) || CONFIGURACAO.includes(codigo) || statusHttp === 401 || statusHttp === 403;\nconst transitorio = !configuracao && (statusHttp === 0 || statusHttp >= 500 || codigo === 'rede' || TRANSITORIO.includes(codigo));\nconst res = { ...base, erro_codigo: codigo, erro_detalhe: detalhe.slice(0, 500), pausa: 1 };\n\nif (configuracao) return [{ json: { ...res, status: 'pendente', devolver: true, pausar: true } }];\nif (transitorio && prep.tentativas < 3) return [{ json: { ...res, status: 'pendente' } }];\nreturn [{ json: { ...res, status: 'falhou' } }];"
+      },
+      "id": "807c546e-726c-4993-888e-d217604290ef",
+      "name": "Ler resposta da Meta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1792,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH r AS (\n  UPDATE disparos\n  SET status = $2,\n      wamid = NULLIF($3, ''),\n      wa_id = NULLIF($4, ''),\n      erro_codigo = NULLIF($5, ''),\n      erro_detalhe = NULLIF($6, ''),\n      tentativas = CASE WHEN $2 = 'pendente' AND $7::boolean THEN greatest(tentativas - 1, 0) ELSE tentativas END,\n      agendado_para = CASE WHEN $2 = 'pendente' AND NOT $7::boolean THEN now() + interval '15 minutes' ELSE agendado_para END,\n      enviado_em = CASE WHEN $2 = 'enviado' THEN now() ELSE enviado_em END,\n      atualizado_em = now()\n  WHERE id = $1::bigint AND status = 'enviando'\n  RETURNING id, campanha_id, status\n), pausa AS (\n  UPDATE campanhas c\n  SET status = 'pausada', atualizado_em = now(),\n      observacao = 'Pausada automaticamente em ' || to_char(now() AT TIME ZONE 'America/Sao_Paulo', 'DD/MM/YYYY HH24:MI') || ': erro ' || COALESCE(NULLIF($5, ''), '-') || ' – ' || COALESCE(NULLIF($6, ''), 'sem detalhe')\n  FROM r\n  WHERE c.id = r.campanha_id AND $8::boolean AND c.status = 'em_andamento'\n  RETURNING c.id, c.titulo, c.observacao\n)\nSELECT $1::bigint AS id,\n       (SELECT status FROM r) AS status,\n       (SELECT json_agg(pausa) FROM pausa) AS campanha_pausada,\n       $9::int AS pausa;",
+        "options": {
+          "queryReplacement": "={{ [$json.id, $json.status, $json.wamid, $json.wa_id, $json.erro_codigo, $json.erro_detalhe, $json.devolver, $json.pausar, $json.pausa] }}"
+        }
+      },
+      "id": "cc186fd6-dc48-49ae-aaee-4a690eaf5029",
+      "name": "Gravar resultado",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2016,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "dc6476fe-e713-41af-9a60-dafccea4c5fc",
+      "name": "Um disparo por vez",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        672,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.pausa }}"
+      },
+      "id": "2467eb08-2ad5-4951-8606-30f80f6a029b",
+      "name": "Pausa entre envios",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2240,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ ($json.pausadas ?? []).length > 0 || $json.travados > 0 }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f1bdb6ea-7a7c-4123-a752-35bd838208dc",
+      "name": "Algo a alertar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        448,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ [($json.pausadas ?? []).map(p => 'Campanha #' + p.id + ' \"' + p.titulo + '\" pausada: ' + p.observacao).join(' '), $json.travados > 0 ? $json.travados + ' disparo(s) ficaram em \"enviando\" sem confirmação e foram para \"revisar\". Confira se a mensagem chegou antes de devolver à fila.' : ''].filter(Boolean).join(' ') }}"
+      },
+      "id": "7d8c721a-762a-46c3-9763-0b676be71251",
+      "name": "Alertar freio do enviador",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        672,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Enviador\nA cada 2 minutos (até por_rodada = 40 por rodada, pausa de 1 a 2 s; a rodada precisa terminar antes da próxima):\n1. **Freio e manutenção:** pausa campanha com 30% ou mais de falhas na última hora (mínimo de 10 envios), marca como \"revisar\" o que travou em \"enviando\", cancela aniversário que não saiu no dia agendado e conclui campanha sem pendências.\n2. **Reservar lote:** só com disparos_ativos, dentro da janela de cada tipo (aniversário na sua janela; benefício, lançamento e as campanhas do painel na janela de benefício, sem feriados) e até por_rodada mensagens, sem passar do limite_diario nem do **limite de gasto do mês** (orcamento_meta_mensal, tela Consumo). Ordem: teste, depois aniversário, depois o resto por agendamento.\n   Limite de gasto: o gasto estimado é o que a Meta informou (meta_consumo) mais as campanhas que ela ainda não informou, pelo preço médio de marketing (sem histórico, R$ 0,3217). No limite, as campanhas, inclusive os aniversários, param, e um alerta crítico vai para o painel; os testes continuam. Elas voltam a sair no mês seguinte ou quando o limite subir.\n3. Para cada disparo: confere de novo campanha, opt-out e modo teste; envia a mensagem aprovada da campanha (modelo_nome e modelo_idioma); grava wamid ou erro; espera de pausa_min_seg a pausa_max_seg segundos.\n\nErro de modelo, token ou conta devolve o disparo à fila e pausa a campanha (alerta no fim da rodada). Erro passageiro tenta de novo em 15 min, até 3 vezes. Os status de entrega e leitura chegam pelo workflow do agente.\nTudo se ajusta na tabela config_disparos do Supabase.",
+        "height": 330,
+        "width": 1300,
+        "color": 7
+      },
+      "id": "14a1c7f7-1faf-4286-9545-c5cd224280e8",
+      "name": "Nota - Enviador",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        192,
+        -528
+      ]
+    }
+  ],
+  "connections": {
+    "Freio e manutenção": {
+      "main": [
+        [
+          {
+            "node": "Reservar lote",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Algo a alertar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reservar lote": {
+      "main": [
+        [
+          {
+            "node": "Um disparo por vez",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resumo da rodada": {
+      "main": [
+        [
+          {
+            "node": "Alertar campanha pausada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conferir antes de enviar": {
+      "main": [
+        [
+          {
+            "node": "Preparar envio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar envio": {
+      "main": [
+        [
+          {
+            "node": "Enviar agora?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar agora?": {
+      "main": [
+        [
+          {
+            "node": "Enviar modelo (WhatsApp)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gravar resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar modelo (WhatsApp)": {
+      "main": [
+        [
+          {
+            "node": "Ler resposta da Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler resposta da Meta": {
+      "main": [
+        [
+          {
+            "node": "Gravar resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gravar resultado": {
+      "main": [
+        [
+          {
+            "node": "Pausa entre envios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Um disparo por vez": {
+      "main": [
+        [
+          {
+            "node": "Resumo da rodada",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Conferir antes de enviar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pausa entre envios": {
+      "main": [
+        [
+          {
+            "node": "Um disparo por vez",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Algo a alertar?": {
+      "main": [
+        [
+          {
+            "node": "Alertar freio do enviador",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A cada 2 minutos": {
+      "main": [
+        [
+          {
+            "node": "Freio e manutenção",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Sao_Paulo",
+    "binaryMode": "separate"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

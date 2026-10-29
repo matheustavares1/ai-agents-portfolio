@@ -1,0 +1,575 @@
+{
+  "name": "Painel · Mensagens da Meta",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Mensagens da Meta (painel)\nMantém no Supabase (**modelos_meta**) a cópia das mensagens aprovadas, em análise e recusadas da conta do WhatsApp (config_disparos.**waba_id**), e cria mensagens novas pedidas pelo painel (tela Mensagens).\n- **A cada 15 minutos** e com a ação \"sincronizar\": lê todas as mensagens na Meta, diz quais o enviador consegue usar e marca as apagadas.\n- **Webhook do painel** (POST /webhook/concierge-mensagens-painel, header x-painel-token): { acao: \"criar\", nome, categoria, cabecalho, corpo com {{1}}, rodape, botoes, variaveis, criado_por } manda a mensagem para aprovação.\nA chave da Meta fica só na credencial \"WhatsApp account\" (precisa da permissão whatsapp_business_management). Crie as tabelas do painel antes de publicar.",
+        "color": 7,
+        "width": 760,
+        "height": 260
+      },
+      "id": "29aac1ba-ba95-41a4-9d14-3fe703da57a9",
+      "name": "Sticky Note c0ed37e7",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -360
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "concierge-mensagens-painel",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "ba4a1085-d0b5-47ad-b267-533cede98a43",
+      "name": "Webhook: painel",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT waba_id FROM config_disparos WHERE id = 1;",
+        "options": {}
+      },
+      "id": "02f9b60b-761c-4ebe-9e1f-812914923d4e",
+      "name": "Ler conta",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        224,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "db057142-dcdc-4f36-8502-02adffa8f407",
+      "name": "A cada 15 minutos",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pedido do painel (criar uma mensagem ou atualizar a lista) ou rodada agendada (atualizar a lista).\nconst doPainel = $('Webhook: painel').isExecuted;\nconst b = doPainel ? ($('Webhook: painel').first().json.body ?? {}) : {};\nconst waba = String($input.first().json.waba_id ?? '').trim();\nconst linha = (s) => String(s ?? '').replace(/\\s+/g, ' ').trim();\nconst acao = doPainel ? linha(b.acao).toLowerCase() : 'sincronizar';\nconst base = { origem: doPainel ? 'painel' : 'agenda', acao, waba };\nconst erros = [];\nif (!/^\\d{5,}$/.test(waba)) erros.push('O ID da conta do WhatsApp (config_disparos.waba_id) não está preenchido. Avise o suporte.');\nif (!['criar', 'sincronizar'].includes(acao)) erros.push('Ação inválida: ' + (acao || 'vazia') + '.');\nif (acao !== 'criar' || erros.length) return [{ json: { ...base, ok: !erros.length, erros } }];\n\n// Mensagem nova. O painel já valida; aqui a conferência se repete, porque a Meta recusa sem explicar bem.\nconst texto = (s) => String(s ?? '').replace(/\\r/g, '').replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();\nconst nome = linha(b.nome);\nconst categoria = linha(b.categoria).toUpperCase();\nconst idioma = linha(b.idioma) || 'pt_BR';\nconst cabecalho = linha(b.cabecalho);\nconst corpo = texto(b.corpo);\nconst rodape = linha(b.rodape);\nconst variaveis = (Array.isArray(b.variaveis) ? b.variaveis : []).map((v, i) => ({ n: i + 1, campo: linha(v?.campo).toLowerCase(), exemplo: linha(v?.exemplo) }));\nconst botoes = (Array.isArray(b.botoes) ? b.botoes : []).map((x) => ({ tipo: x?.tipo === 'link' ? 'link' : 'resposta', texto: linha(x?.texto), url: linha(x?.url) }));\nconst respostas = botoes.filter((x) => x.tipo === 'resposta').map(({ tipo, texto }) => ({ tipo, texto }));\nconst links = botoes.filter((x) => x.tipo === 'link');\n\nif (!/^[a-z0-9_]{1,512}$/.test(nome)) erros.push('Nome inválido: use só letras minúsculas, números e _.');\nif (!['MARKETING', 'UTILITY'].includes(categoria)) erros.push('Categoria inválida: use Marketing ou Utilidade.');\nif (!/^[a-z]{2,3}(_[A-Z]{2})?$/.test(idioma)) erros.push('Idioma inválido.');\nif (cabecalho.length > 60) erros.push('O título em destaque pode ter até 60 caracteres.');\nif (/[{}]/.test(cabecalho)) erros.push('O título em destaque não pode ter campos variáveis.');\nif (!corpo) erros.push('Escreva o texto da mensagem.');\nif (corpo.length > 1024) erros.push('O texto pode ter até 1.024 caracteres.');\nif (rodape.length > 60) erros.push('O rodapé pode ter até 60 caracteres.');\nif (/[{}]/.test(rodape)) erros.push('O rodapé não pode ter campos variáveis.');\n// Campos do corpo: {{1}}, {{2}}... na ordem em que aparecem pela primeira vez, um exemplo para cada.\nconst ordem = [...new Set([...corpo.matchAll(/\\{\\{(\\d+)\\}\\}/g)].map((m) => Number(m[1])))];\nif (/[{}]/.test(corpo.replace(/\\{\\{\\d+\\}\\}/g, ''))) erros.push('Há um campo variável mal escrito no texto.');\nif (ordem.some((n, i) => n !== i + 1)) erros.push('Os campos do texto precisam ser {{1}}, {{2}}... na ordem em que aparecem.');\nif (variaveis.length !== ordem.length || variaveis.some((v) => !v.exemplo)) erros.push('Informe um exemplo para cada campo do texto.');\nif (variaveis.some((v) => v.exemplo.length > 200)) erros.push('Cada exemplo pode ter até 200 caracteres.');\nif (/^\\{\\{\\d+\\}\\}/.test(corpo) || /\\{\\{\\d+\\}\\}$/.test(corpo)) erros.push('O texto não pode começar nem terminar com um campo variável.');\nif (respostas.length > 3) erros.push('Use no máximo 3 respostas rápidas.');\nif (links.length > 2) erros.push('Use no máximo 2 botões de link.');\nif (botoes.some((x) => !x.texto || x.texto.length > 25)) erros.push('O texto de cada botão precisa ter de 1 a 25 caracteres.');\nif (links.some((x) => !/^https:\\/\\/[^\\s{}]+\\.[^\\s{}]+$/i.test(x.url) || x.url.length > 2000)) erros.push('O endereço de cada botão de link precisa começar com https:// e não pode ter espaços.');\nconst titulo = linha(b.titulo).slice(0, 120);\nif (erros.length) return [{ json: { ...base, ok: false, erros: [...new Set(erros)] } }];\n\nconst componentes = [];\nif (cabecalho) componentes.push({ type: 'HEADER', format: 'TEXT', text: cabecalho });\ncomponentes.push(variaveis.length ? { type: 'BODY', text: corpo, example: { body_text: [variaveis.map((v) => v.exemplo)] } } : { type: 'BODY', text: corpo });\nif (rodape) componentes.push({ type: 'FOOTER', text: rodape });\n// A Meta exige os botões em grupos: as respostas rápidas juntas, depois os links.\nconst emOrdem = [...respostas, ...links];\nif (emOrdem.length) {\n  componentes.push({ type: 'BUTTONS', buttons: emOrdem.map((x) => (x.tipo === 'link' ? { type: 'URL', text: x.texto, url: x.url } : { type: 'QUICK_REPLY', text: x.texto })) });\n}\nreturn [{ json: {\n  ...base,\n  ok: true,\n  erros: [],\n  corpo_meta: { name: nome, language: idioma, category: categoria, components: componentes },\n  registro: { nome, idioma, categoria, titulo: titulo || null, cabecalho: cabecalho || null, corpo, rodape: rodape || null, botoes: emOrdem, variaveis, criado_por: linha(b.criado_por) || null },\n} }];"
+      },
+      "id": "62fdb2cc-2ddf-4333-941b-b6af74405300",
+      "name": "Montar pedido",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "feb5de2a-5267-45e7-bdfd-7dc92ea9465f",
+      "name": "Pedido válido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        672,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.acao === 'criar' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b284c0ab-a1ee-48fb-82c2-b9e6acadfe28",
+      "name": "Criar mensagem?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        896,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v26.0/{{ $json.waba }}/message_templates",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "whatsAppApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.corpo_meta) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "b7a38ec2-25d6-4093-b6c7-6f29148d4a92",
+      "name": "Criar mensagem na Meta",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1120,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Resposta da Meta ao pedido de aprovação: o ID e a situação da mensagem, ou o motivo da recusa.\nconst pedido = $('Montar pedido').first().json;\nconst r = $input.first().json;\nconst status = Number(r.statusCode || 0);\nlet corpo = r.body;\nif (typeof corpo === 'string') { try { corpo = JSON.parse(corpo); } catch (e) { corpo = {}; } }\ncorpo = corpo || {};\nif (status >= 200 && status < 300 && corpo.id) {\n  return [{ json: { ok: true, modelo: {\n    ...pedido.registro,\n    id: String(corpo.id),\n    status: String(corpo.status || 'PENDING').toUpperCase(),\n    // A Meta pode mudar a categoria pedida (por exemplo, de Utilidade para Marketing).\n    categoria: String(corpo.category || pedido.registro.categoria).toUpperCase(),\n  } } }];\n}\nconst e = corpo.error || {};\nconst original = [e.error_user_title, e.error_user_msg || e.message].filter(Boolean).join(': ') || 'erro ' + (status || 'de rede') + ' sem detalhe';\nconst codigo = Number(e.code || 0);\nconst TRADUCOES = [\n  [() => codigo === 190, 'A chave de acesso da Meta venceu ou foi trocada. Avise o suporte.'],\n  [() => codigo === 10 || codigo === 200 || /permission/i.test(original), 'A chave da Meta não tem permissão para criar mensagens (whatsapp_business_management). Avise o suporte.'],\n  [() => /being deleted/i.test(original), 'Uma mensagem com esse nome foi apagada há pouco na Meta, e o nome só volta a valer depois de 4 semanas. Mude o nome.'],\n  [() => /already exists/i.test(original), 'Já existe uma mensagem com esse nome e idioma na Meta. Mude o nome.'],\n  [() => /(start|beginning) or (the )?end/i.test(original), 'O texto não pode começar nem terminar com um campo variável.'],\n  [() => /too many (variables|parameters)|parameters? to (the )?(message )?length/i.test(original), 'Há campos variáveis demais para o tamanho do texto. Escreva mais texto fixo ou use menos campos.'],\n  [() => /per hour|rate limit/i.test(original) || codigo === 4 || codigo === 80008, 'A Meta limita quantas mensagens podem ser criadas por hora. Tente de novo mais tarde.'],\n];\nconst traducao = TRADUCOES.find(([teste]) => teste());\nconst erro = traducao ? traducao[1] + ' (Meta: ' + original + ')' : 'A Meta recusou a mensagem: ' + original;\nreturn [{ json: { ok: false, http_status: status >= 500 || !status ? 502 : 422, erro } }];"
+      },
+      "id": "ffb2d9d5-7fe4-4aac-bbc3-fdb224c1a885",
+      "name": "Ler resposta da Meta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6b1979b4-cfcb-4e99-987e-c1d008570929",
+      "name": "Criou?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1568,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Mensagem que o painel acabou de mandar para aprovação, com o que cada campo quer dizer.\nINSERT INTO modelos_meta (id, nome, idioma, categoria, status, titulo, cabecalho, corpo, rodape, botoes, variaveis, origem, criado_por)\nSELECT x.id, x.nome, x.idioma, x.categoria, x.status, x.titulo, x.cabecalho, x.corpo, x.rodape,\n       coalesce(x.botoes, '[]'), coalesce(x.variaveis, '[]'), 'painel', x.criado_por\nFROM jsonb_to_record($1::jsonb) AS x(id text, nome text, idioma text, categoria text, status text, titulo text, cabecalho text,\n                                     corpo text, rodape text, botoes jsonb, variaveis jsonb, criado_por text)\nON CONFLICT (id) DO UPDATE SET\n  status = excluded.status, categoria = excluded.categoria, titulo = excluded.titulo, variaveis = excluded.variaveis,\n  origem = 'painel', criado_por = excluded.criado_por, existe_na_meta = true, sincronizado_em = now()\nRETURNING id, status;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json.modelo)] }}"
+        }
+      },
+      "id": "0b4f3e3e-93ab-47ac-9285-b2e36cc6130b",
+      "name": "Gravar mensagem criada",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1792,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Resposta ao painel. Na rodada agendada não há a quem responder: um erro vira falha da execução (e alerta).\nconst pedido = $('Montar pedido').first().json;\nlet status;\nlet resposta;\nif (!pedido.ok) {\n  status = 400;\n  resposta = { ok: false, mensagem: pedido.erros.join(' '), erros: pedido.erros };\n} else if (pedido.acao === 'criar') {\n  const c = $('Ler resposta da Meta').first().json;\n  if (!c.ok) {\n    status = c.http_status || 422;\n    resposta = { ok: false, mensagem: c.erro, erros: [c.erro] };\n  } else {\n    const m = c.modelo;\n    const CATEGORIAS = { MARKETING: 'Marketing', UTILITY: 'Utilidade', AUTHENTICATION: 'Autenticação' };\n    const partes = [];\n    if (m.status === 'APPROVED') partes.push('A Meta já aprovou a mensagem. Ela pode ser usada em Nova campanha.');\n    else if (m.status === 'REJECTED') partes.push('A Meta recusou a mensagem logo no envio. Veja o motivo na tela Mensagens, corrija e envie de novo com outro nome.');\n    else partes.push('Mensagem enviada para aprovação da Meta. A análise costuma levar de alguns minutos a 24 horas, e a situação aparece na tela Mensagens.');\n    if (m.categoria !== pedido.registro.categoria) partes.push('A Meta classificou a mensagem como ' + (CATEGORIAS[m.categoria] || m.categoria) + '.');\n    status = 200;\n    resposta = { ok: true, mensagem: partes.join(' '), modelo: { id: m.id, nome: m.nome, status: m.status, categoria: m.categoria } };\n  }\n} else {\n  const l = $('Juntar modelos').first().json;\n  if (!l.ok) {\n    status = 502;\n    resposta = { ok: false, mensagem: l.erro, erros: [l.erro] };\n  } else {\n    status = 200;\n    resposta = {\n      ok: true,\n      mensagem: 'Lista atualizada: ' + l.total + ' mensagem(ns) na Meta, ' + l.aprovados + ' aprovada(s), ' + l.em_analise + ' em análise e ' + l.recusados + ' recusada(s).',\n      total: l.total, aprovados: l.aprovados, em_analise: l.em_analise, recusados: l.recusados,\n    };\n  }\n}\nif (pedido.origem === 'agenda') {\n  if (!resposta.ok) throw new Error('Mensagens da Meta: ' + resposta.mensagem);\n  return [];\n}\nreturn [{ json: { http_status: status, resposta } }];"
+      },
+      "id": "f12728eb-aa97-4305-bc0b-6c3b2f88718b",
+      "name": "Montar resposta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2016,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v26.0/{{ $json.waba }}/message_templates?fields=id,name,language,status,category,components,rejected_reason,parameter_format&limit=100",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "whatsAppApi",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 30000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "responseContainsNextURL",
+              "nextURL": "={{ $response.body.paging?.next }}",
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body?.paging?.next }}",
+              "limitPagesFetched": true,
+              "maxRequests": 30
+            }
+          }
+        }
+      },
+      "id": "9796b22d-4d72-46c5-b6ad-23dec528cd34",
+      "name": "Listar mensagens da Meta",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1120,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Junta as páginas da lista da Meta e diz, para cada mensagem, se o enviador consegue usá-la.\nconst paginas = $input.all().map((i) => i.json);\nconst problema = paginas.find((p) => Number(p.statusCode || 200) >= 300 || p.body?.error || p.error);\nif (problema) {\n  const e = problema.body?.error || {};\n  const detalhe = [e.error_user_title, e.error_user_msg || e.message].filter(Boolean).join(': ') || (typeof problema.error === 'string' ? problema.error : problema.error?.message) || 'erro ' + (problema.statusCode || 'de rede');\n  return [{ json: { ok: false, erro: 'Não foi possível ler as mensagens na Meta: ' + detalhe } }];\n}\n\nfunction converter(t) {\n  const comps = Array.isArray(t.components) ? t.components : [];\n  const achar = (tipo) => comps.find((c) => String(c.type).toUpperCase() === tipo);\n  const problemas = [];\n  const header = achar('HEADER');\n  let cabecalho = null;\n  if (header) {\n    if (String(header.format || 'TEXT').toUpperCase() !== 'TEXT') problemas.push('título com imagem, vídeo ou documento');\n    else {\n      cabecalho = String(header.text || '');\n      if (/\\{\\{/.test(cabecalho)) problemas.push('campo variável no título');\n    }\n  }\n  const corpo = String(achar('BODY')?.text || '');\n  const footer = achar('FOOTER');\n  const botoes = (achar('BUTTONS')?.buttons || []).map((x) => {\n    const tipo = String(x.type || '').toUpperCase();\n    if (tipo === 'QUICK_REPLY') return { tipo: 'resposta', texto: String(x.text || '') };\n    if (tipo === 'URL') {\n      if (/\\{\\{/.test(String(x.url || ''))) problemas.push('link com parte variável');\n      return { tipo: 'link', texto: String(x.text || ''), url: String(x.url || '') };\n    }\n    if (tipo === 'PHONE_NUMBER') return { tipo: 'telefone', texto: String(x.text || ''), telefone: String(x.phone_number || '') };\n    problemas.push('botão do tipo ' + tipo.toLowerCase());\n    return { tipo: tipo.toLowerCase(), texto: String(x.text || '') };\n  });\n  const outros = comps.filter((c) => !['HEADER', 'BODY', 'FOOTER', 'BUTTONS'].includes(String(c.type).toUpperCase()));\n  if (outros.length) problemas.push('parte do tipo ' + outros.map((c) => String(c.type).toLowerCase()).join(', '));\n  if (String(t.parameter_format || '').toUpperCase() === 'NAMED') problemas.push('campos variáveis com nome');\n  const categoria = String(t.category || '').toUpperCase();\n  if (categoria === 'AUTHENTICATION') problemas.push('mensagem de autenticação');\n  const numeros = [...corpo.matchAll(/\\{\\{\\s*(\\d+)\\s*\\}\\}/g)].map((m) => Number(m[1]));\n  const motivo = String(t.rejected_reason || '').toUpperCase();\n  return {\n    id: String(t.id),\n    nome: String(t.name || ''),\n    idioma: String(t.language || ''),\n    categoria,\n    status: String(t.status || '').toUpperCase(),\n    motivo: motivo && motivo !== 'NONE' ? motivo : null,\n    cabecalho,\n    corpo,\n    rodape: footer ? String(footer.text || '') : null,\n    botoes,\n    n_variaveis: numeros.length ? Math.max(...numeros) : 0,\n    suportado: problemas.length === 0,\n    observacao: problemas.length ? 'Não dá para usar em campanha: ' + [...new Set(problemas)].join(', ') + '.' : null,\n  };\n}\n\nconst modelos = paginas.flatMap((p) => p.body?.data ?? p.data ?? []).filter((t) => t && t.id).map(converter);\nconst conta = (s) => modelos.filter((m) => s.includes(m.status)).length;\nreturn [{ json: {\n  ok: true,\n  total: modelos.length,\n  aprovados: conta(['APPROVED']),\n  em_analise: conta(['PENDING', 'IN_APPEAL']),\n  recusados: conta(['REJECTED']),\n  modelos: JSON.stringify(modelos),\n} }];"
+      },
+      "id": "49ff8c61-7eec-406f-ad0f-ad77305af09e",
+      "name": "Juntar modelos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ed3e8964-8b4c-46c4-930b-ac8de0ea9cf7",
+      "name": "Leu a lista?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1568,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Atualiza a cópia das mensagens da Meta. O que o painel sabe de cada campo (nome do cliente ou campo\n-- da campanha) continua, se o número de campos não mudou. A mensagem que sumiu da Meta sai da lista.\nWITH entrada AS (\n  SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(id text, nome text, idioma text, categoria text, status text, motivo text,\n    cabecalho text, corpo text, rodape text, botoes jsonb, n_variaveis integer, suportado boolean, observacao text)\n), gravados AS (\n  INSERT INTO modelos_meta AS m (id, nome, idioma, categoria, status, motivo, cabecalho, corpo, rodape, botoes, variaveis,\n                                 suportado, observacao, existe_na_meta, sincronizado_em)\n  SELECT e.id, e.nome, e.idioma, e.categoria, e.status, e.motivo, e.cabecalho, coalesce(e.corpo, ''), e.rodape, coalesce(e.botoes, '[]'),\n         coalesce((SELECT jsonb_agg(jsonb_build_object('n', g) ORDER BY g) FROM generate_series(1, e.n_variaveis) g), '[]'),\n         e.suportado, e.observacao, true, now()\n  FROM entrada e\n  ON CONFLICT (id) DO UPDATE SET\n    nome = excluded.nome, idioma = excluded.idioma, categoria = excluded.categoria,\n    status_em = CASE WHEN m.status IS DISTINCT FROM excluded.status THEN now() ELSE m.status_em END,\n    status = excluded.status, motivo = excluded.motivo, cabecalho = excluded.cabecalho, corpo = excluded.corpo,\n    rodape = excluded.rodape, botoes = excluded.botoes,\n    variaveis = CASE WHEN jsonb_array_length(m.variaveis) = jsonb_array_length(excluded.variaveis) THEN m.variaveis ELSE excluded.variaveis END,\n    suportado = excluded.suportado, observacao = excluded.observacao, existe_na_meta = true, sincronizado_em = now()\n  RETURNING m.id\n), sumidos AS (\n  UPDATE modelos_meta SET existe_na_meta = false, sincronizado_em = now()\n  WHERE existe_na_meta AND id NOT IN (SELECT id FROM entrada)\n  RETURNING id\n)\nSELECT (SELECT count(*) FROM gravados)::int AS gravados, (SELECT count(*) FROM sumidos)::int AS sumidos;",
+        "options": {
+          "queryReplacement": "={{ [$json.modelos] }}"
+        }
+      },
+      "id": "e81d50e5-163a-437d-a5ba-04009f4345aa",
+      "name": "Gravar lista",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1792,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.resposta) }}",
+        "options": {
+          "responseCode": "={{ $json.http_status }}"
+        }
+      },
+      "id": "f9d08c0d-d742-4143-b266-59293dab0155",
+      "name": "Responder ao painel",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2240,
+        288
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: painel": {
+      "main": [
+        [
+          {
+            "node": "Ler conta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler conta": {
+      "main": [
+        [
+          {
+            "node": "Montar pedido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A cada 15 minutos": {
+      "main": [
+        [
+          {
+            "node": "Ler conta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar pedido": {
+      "main": [
+        [
+          {
+            "node": "Pedido válido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pedido válido?": {
+      "main": [
+        [
+          {
+            "node": "Criar mensagem?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Montar resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Criar mensagem?": {
+      "main": [
+        [
+          {
+            "node": "Criar mensagem na Meta",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Listar mensagens da Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Criar mensagem na Meta": {
+      "main": [
+        [
+          {
+            "node": "Ler resposta da Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler resposta da Meta": {
+      "main": [
+        [
+          {
+            "node": "Criou?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Criou?": {
+      "main": [
+        [
+          {
+            "node": "Gravar mensagem criada",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Montar resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gravar mensagem criada": {
+      "main": [
+        [
+          {
+            "node": "Montar resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar resposta": {
+      "main": [
+        [
+          {
+            "node": "Responder ao painel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Listar mensagens da Meta": {
+      "main": [
+        [
+          {
+            "node": "Juntar modelos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Juntar modelos": {
+      "main": [
+        [
+          {
+            "node": "Leu a lista?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leu a lista?": {
+      "main": [
+        [
+          {
+            "node": "Gravar lista",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Montar resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gravar lista": {
+      "main": [
+        [
+          {
+            "node": "Montar resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Sao_Paulo"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

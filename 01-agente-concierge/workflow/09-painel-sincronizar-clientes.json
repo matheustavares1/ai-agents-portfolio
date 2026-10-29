@@ -1,0 +1,141 @@
+{
+  "name": "Painel · Sincronizar clientes",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "ab8a8491-b28a-497d-a85b-68e610218ab4",
+      "name": "A cada 6 horas",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "{{URL_DO_APP_DO_CLIENTE}}/functions/publicoDisparos",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ acao: \"painel\" }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "854e69d7-5142-4174-944b-b26cac748985",
+      "name": "Buscar clientes (Base44)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        240,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "const ent = $input.first().json;\nconst clientes = Array.isArray(ent.clientes) ? ent.clientes : [];\n// Sem nenhum cliente, algo deu errado no Base44: para aqui, sem marcar ninguém como fora da base.\nif (!clientes.length) throw new Error('O Base44 devolveu a lista de clientes vazia.');\nconst linha = (s) => (s == null ? null : String(s).replace(/\\s+/g, ' ').trim() || null);\nconst vistos = new Set();\nconst linhas = [];\nfor (const c of clientes) {\n  const pessoa = linha(c.cliente_id);\n  if (!pessoa) continue;\n  const ids = Array.isArray(c.ids) && c.ids.length ? c.ids : [pessoa];\n  for (const id of [pessoa, ...ids]) {\n    const conta = linha(id);\n    if (!conta || vistos.has(conta)) continue;\n    vistos.add(conta);\n    linhas.push({\n      conta_id: conta,\n      pessoa_id: pessoa,\n      nome_completo: linha(c.nome_completo),\n      primeiro_nome: linha(c.primeiro_nome),\n      categoria: linha(c.categoria),\n      assessor: linha(c.assessor),\n      celular: linha(c.celular),\n      tipo_cliente: linha(c.tipo_cliente),\n    });\n  }\n}\nreturn [{ json: { pessoas: clientes.length, contas: linhas.length, payload: JSON.stringify(linhas) } }];"
+      },
+      "id": "aaff903c-fbea-471d-9d5a-1d55728408ed",
+      "name": "Montar linhas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH entrada AS (\n  SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(conta_id text, pessoa_id text, nome_completo text, primeiro_nome text, categoria text, assessor text, celular text, tipo_cliente text)\n), gravados AS (\n  INSERT INTO clientes_painel (conta_id, pessoa_id, nome_completo, primeiro_nome, categoria, assessor, celular, tipo_cliente, no_base44, sincronizado_em)\n  SELECT conta_id, pessoa_id, nome_completo, primeiro_nome, categoria, assessor, celular, tipo_cliente, true, now() FROM entrada\n  ON CONFLICT (conta_id) DO UPDATE\n  SET pessoa_id = EXCLUDED.pessoa_id, nome_completo = EXCLUDED.nome_completo, primeiro_nome = EXCLUDED.primeiro_nome,\n      categoria = EXCLUDED.categoria, assessor = EXCLUDED.assessor, celular = EXCLUDED.celular,\n      tipo_cliente = EXCLUDED.tipo_cliente, no_base44 = true, sincronizado_em = now()\n  RETURNING conta_id\n), sumidos AS (\n  -- Contas que saíram do Base44 continuam aqui (as conversas antigas mantêm o nome), só marcadas.\n  UPDATE clientes_painel SET no_base44 = false\n  WHERE no_base44 AND conta_id NOT IN (SELECT conta_id FROM entrada)\n  RETURNING conta_id\n)\nSELECT (SELECT count(*) FROM gravados)::int AS gravados, (SELECT count(*) FROM sumidos)::int AS fora_do_base44;",
+        "options": {
+          "queryReplacement": "={{ [$json.payload] }}"
+        }
+      },
+      "id": "f61a3322-a841-4c83-9f1f-234d61bc555f",
+      "name": "Gravar clientes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        720,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Painel · Sincronizar clientes\nA cada 6 horas, pede ao Base44 a lista de clientes (função **publicoDisparos**, ação \"painel\") e atualiza a tabela **clientes_painel**, que dá nome, categoria e assessor às conversas e pedidos do painel.\n- Uma linha por conta (PF e PJ da mesma pessoa apontam para o mesmo pessoa_id).\n- Contas que saíram do Base44 ficam marcadas (no_base44 = false), sem apagar.\n- Lista vazia para com erro, sem marcar ninguém.\n\n**Ligar só depois** de criar a função publicoDisparos no app (Base44) e as tabelas do painel no Postgres.",
+        "color": 7,
+        "width": 760,
+        "height": 280
+      },
+      "id": "4be1bd7d-fdd7-45ea-9199-da46961e00b7",
+      "name": "Sticky Note ed3471da",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -320
+      ]
+    }
+  ],
+  "connections": {
+    "A cada 6 horas": {
+      "main": [
+        [
+          {
+            "node": "Buscar clientes (Base44)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar clientes (Base44)": {
+      "main": [
+        [
+          {
+            "node": "Montar linhas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar linhas": {
+      "main": [
+        [
+          {
+            "node": "Gravar clientes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Sao_Paulo"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

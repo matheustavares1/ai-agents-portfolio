@@ -1,0 +1,346 @@
+{
+  "name": "Campanhas · Aniversários",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 7
+            }
+          ]
+        }
+      },
+      "id": "9a5fd308-fdab-467a-914b-a9017fa75076",
+      "name": "Todo dia às 7h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.*,\n       (SELECT coalesce(jsonb_object_agg(to_char(p.mes, 'YYYY-MM') || ':' || p.categoria,\n                                         jsonb_build_object('beneficio', p.beneficio, 'regra', p.regra)), '{}'::jsonb)\n        FROM presentes_aniversario p\n        -- Os meses do período do planejador: de hoje até daqui a 6 dias, no horário de Brasília.\n        WHERE p.mes BETWEEN date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo')::date\n                        AND date_trunc('month', (now() AT TIME ZONE 'America/Sao_Paulo') + interval '6 days')::date) AS presentes,\n       -- Presentes exclusivos que aguardam o aniversário, por conta do Base44 (todas as contas da pessoa).\n       (SELECT coalesce(jsonb_object_agg(cp.conta_id, jsonb_build_object('id', e.id, 'beneficio', e.beneficio, 'regra', e.regra)), '{}'::jsonb)\n        FROM presentes_aniversario_cliente e\n        JOIN clientes_painel cp ON cp.pessoa_id = e.pessoa_id\n        WHERE e.disparo_id IS NULL) AS exclusivos\nFROM config_disparos c\nWHERE c.id = 1;",
+        "options": {}
+      },
+      "id": "b61bc28a-ce82-4908-8c01-02506831b54c",
+      "name": "Ler configuração",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Período: de hoje até daqui a 6 dias, no horário de Brasília. A mensagem só sai no dia do aniversário,\n// porque o texto do modelo diz \"Hoje\"; quem fez aniversário ontem não entra mais.\nconst ZONA = 'America/Sao_Paulo';\nconst hoje = DateTime.now().setZone(ZONA).startOf('day');\nconst datas = {};\nfor (let i = 0; i <= 6; i++) {\n  const d = hoje.plus({ days: i });\n  datas[d.toFormat('MM-dd')] = d.toISODate();\n  // Quem nasceu em 29/02 recebe em 28/02 nos anos não bissextos.\n  if (d.toFormat('MM-dd') === '02-28' && !d.isInLeapYear) datas['02-29'] = d.toISODate();\n}\nreturn [{ json: {\n  de: hoje.toISODate(),\n  ate: hoje.plus({ days: 6 }).toISODate(),\n  periodo: hoje.toFormat('dd/MM') + ' a ' + hoje.plus({ days: 6 }).toFormat('dd/MM'),\n  dias: Object.keys(datas),\n  datas,\n} }];"
+      },
+      "id": "f5d077cd-85fb-441c-bedb-90e82e180433",
+      "name": "Calcular período",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "{{URL_DO_APP_DO_CLIENTE}}/functions/publicoDisparos",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ acao: \"aniversariantes\", dias: $json.dias }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "a8f77682-b2ae-42ea-8dc0-9671d97379c5",
+      "name": "Buscar aniversariantes (Base44)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        672,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "const ZONA = 'America/Sao_Paulo';\nconst linha = (s) => String(s ?? '').replace(/\\s+/g, ' ').trim();\nconst CATEGORIAS = { bronze: 'Bronze', prata: 'Prata', ouro: 'Ouro', legado: 'Diamante', diamante: 'Diamante' };\nconst renderizar = (texto, vars) => String(texto || '').replace(/\\{\\{(\\d+)\\}\\}/g, (_, n) => vars[Number(n) - 1] ?? '');\nfunction celular(v) {\n  let n = String(v ?? '').replace(/\\D/g, '').replace(/^0+/, '');\n  if (n.length === 10 || n.length === 11) n = '55' + n;\n  // Celular brasileiro sem o nono dígito: 55 + DDD + 8 dígitos começando em 6 a 9.\n  if (/^55\\d{2}[6-9]\\d{7}$/.test(n)) n = n.slice(0, 4) + '9' + n.slice(4);\n  return /^\\d{12,15}$/.test(n) ? n : '';\n}\n\nconst cfg = $('Ler configuração').first().json;\nconst periodo = $('Calcular período').first().json;\n// O Base44 devolve { clientes: [...] }; se vier uma lista solta, o n8n já separou em itens.\nconst itens = $input.all().map((i) => i.json);\nconst clientes = itens.length === 1 && Array.isArray(itens[0].clientes) ? itens[0].clientes : itens.filter((c) => c && c.cliente_id);\n\nconst suporte = celular(cfg.whatsapp_suporte);\n// Presente do mês do aniversário (tabela presentes_aniversario, tela Envios > Presentes de aniversário):\n// o da categoria do cliente ou, sem ele, o de todas. Mês sem presente: o cliente não entra na fila.\nconst presentes = cfg.presentes && typeof cfg.presentes === 'object' ? cfg.presentes : {};\nconst MESES = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];\nfunction presenteDo(dia, categoria) {\n  const mes = dia.toFormat('yyyy-MM');\n  const b = presentes[mes + ':' + categoria] || presentes[mes + ':todas'];\n  // O modelo já põe o ponto depois do presente.\n  const beneficio = b ? linha(b.beneficio).replace(/[.;,]+$/, '') : '';\n  return beneficio && linha(b.regra) ? { beneficio, regra: linha(b.regra) } : null;\n}\n// Presente exclusivo de um cliente (mesma tela): vale uma vez, no lugar do presente do mês, mesmo num mês sem presente.\nconst exclusivos = cfg.exclusivos && typeof cfg.exclusivos === 'object' ? cfg.exclusivos : {};\nfunction presenteExclusivo(clienteId) {\n  const e = exclusivos[clienteId];\n  const beneficio = e ? linha(e.beneficio).replace(/[.;,]+$/, '') : '';\n  return beneficio && linha(e.regra) ? { beneficio, regra: linha(e.regra), id: Number(e.id) } : null;\n}\n\nconst agora = DateTime.now().setZone(ZONA);\nconst [hIni, mIni] = String(cfg.janela_aniversario_inicio || '09:00').split(':').map(Number);\nconst [hFim, mFim] = String(cfg.janela_aniversario_fim || '12:00').split(':').map(Number);\nconst diasPermitidos = (Array.isArray(cfg.janela_aniversario_dias) ? cfg.janela_aniversario_dias : [1, 2, 3, 4, 5, 6, 7]).map(Number);\n\n// Dia do envio: sempre o próprio aniversário, porque o texto do modelo diz \"Hoje\". Se esse dia da semana\n// estiver fora de janela_aniversario_dias, o cliente não entra na fila. O enviador cancela o que não sair no dia.\n// Horário sorteado dentro da janela, com 15 min de folga no fim. Se já passou, sai na próxima rodada.\nfunction horario(dia) {\n  const ini = dia.set({ hour: hIni, minute: mIni, second: 0, millisecond: 0 });\n  const fim = dia.set({ hour: hFim, minute: mFim, second: 0, millisecond: 0 });\n  const folga = Math.max(0, Math.floor(fim.diff(ini, 'minutes').minutes) - 15);\n  const h = ini.plus({ minutes: Math.floor(Math.random() * (folga + 1)) });\n  return h < agora ? agora : h;\n}\n\nconst ignorados = { fora_do_periodo: 0, fora_da_janela: 0, inativo: 0, pj: 0, sem_celular: 0, centralizador: 0, repetido: 0, sem_aceite: 0, sem_nome: 0, sem_presente: 0 };\nconst mesesSemPresente = new Set();\nconst vistos = new Set();\n// A mesma pessoa pode ter mais de um cadastro com o mesmo celular: só um recebe.\nconst telefones = new Set();\nconst fila = [];\nfor (const c of clientes) {\n  const id = linha(c.cliente_id);\n  const m = linha(c.aniversario).match(/(\\d{2})-(\\d{2})(?:T.*)?$/);\n  const data = m ? periodo.datas[m[1] + '-' + m[2]] : null;\n  if (!id || !data || vistos.has(id)) { ignorados.fora_do_periodo++; continue; }\n  vistos.add(id);\n  const dia = DateTime.fromISO(data, { zone: ZONA });\n  if (!diasPermitidos.includes(dia.weekday)) { ignorados.fora_da_janela++; continue; }\n  if (c.ativo === false) { ignorados.inativo++; continue; }\n  if (linha(c.tipo_cliente).toUpperCase() === 'PJ') { ignorados.pj++; continue; }\n  const telefone = celular(c.celular);\n  if (!telefone) { ignorados.sem_celular++; continue; }\n  if (suporte && telefone === suporte) { ignorados.centralizador++; continue; }\n  if (telefones.has(telefone)) { ignorados.repetido++; continue; }\n  telefones.add(telefone);\n  if (cfg.exigir_aceite === true && c.aceita_comunicacao !== true) { ignorados.sem_aceite++; continue; }\n  const nome = linha(c.primeiro_nome).split(' ')[0];\n  if (!nome) { ignorados.sem_nome++; continue; }\n  const categoria = CATEGORIAS[linha(c.categoria).toLowerCase()] || linha(c.categoria);\n  const exclusivo = presenteExclusivo(id);\n  const b = exclusivo || presenteDo(dia, categoria);\n  if (!b) { ignorados.sem_presente++; mesesSemPresente.add(MESES[dia.month - 1] + ' de ' + dia.year); continue; }\n  const variaveis = [nome, b.beneficio, b.regra];\n  fila.push({\n    ano: dia.year,\n    cliente_id: id,\n    telefone,\n    primeiro_nome: nome,\n    categoria: categoria || null,\n    variaveis,\n    texto: renderizar(cfg.texto_modelo_aniversario, variaveis),\n    presente_exclusivo_id: exclusivo ? exclusivo.id : null,\n    agendado_para: horario(dia).toUTC().toISO(),\n  });\n}\n\nreturn [{ json: {\n  periodo: periodo.periodo,\n  total_base44: clientes.length,\n  na_lista: fila.length,\n  ignorados,\n  meses_sem_presente: [...mesesSemPresente],\n  exclusivos: fila.filter((f) => f.presente_exclusivo_id).length,\n  fila,\n} }];"
+      },
+      "id": "a9dcf9fb-8795-469e-8dd2-62d8d4244f23",
+      "name": "Montar fila de aniversários",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH cfg AS (\n  SELECT * FROM config_disparos WHERE id = 1\n), entrada AS (\n  SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(ano int, cliente_id text, telefone text, primeiro_nome text, categoria text, variaveis jsonb, texto text, agendado_para timestamptz, presente_exclusivo_id bigint)\n), camp AS (\n  INSERT INTO campanhas (tipo, chave, titulo, modelo_nome, modelo_idioma, origem)\n  SELECT DISTINCT ON (e.ano) 'aniversario', 'aniversario-' || e.ano, 'Aniversários ' || e.ano, cfg.modelo_aniversario, cfg.modelo_idioma, 'agendador'\n  FROM entrada e CROSS JOIN cfg\n  ORDER BY e.ano\n  ON CONFLICT (chave) DO UPDATE SET modelo_nome = EXCLUDED.modelo_nome, modelo_idioma = EXCLUDED.modelo_idioma, atualizado_em = now()\n  RETURNING id, chave\n), novos AS (\n  INSERT INTO disparos (campanha_id, cliente_id, telefone, primeiro_nome, categoria, variaveis, texto, agendado_para)\n  SELECT c.id, e.cliente_id, e.telefone, e.primeiro_nome, e.categoria, e.variaveis, e.texto, e.agendado_para\n  FROM entrada e\n  JOIN camp c ON c.chave = 'aniversario-' || e.ano\n  WHERE NOT EXISTS (SELECT 1 FROM comunicacao_atual ca WHERE ca.chave IN (e.cliente_id, e.telefone) AND ca.situacao = 'optout')\n    -- O mesmo celular não recebe duas vezes no ano, mesmo que o cadastro no Base44 mude de ID.\n    AND NOT EXISTS (SELECT 1 FROM disparos d WHERE d.campanha_id = c.id AND d.telefone = e.telefone)\n  ON CONFLICT (campanha_id, cliente_id) DO NOTHING\n  RETURNING id, cliente_id\n), exclusivos AS (\n  -- O presente exclusivo fica ligado aos parabéns que vão com ele; a tela passa a mostrar a situação do envio.\n  UPDATE presentes_aniversario_cliente e SET disparo_id = n.id, atualizado_em = now()\n  FROM novos n\n  JOIN entrada x ON x.cliente_id = n.cliente_id\n  WHERE e.id = x.presente_exclusivo_id AND e.disparo_id IS NULL\n  RETURNING e.id\n)\nSELECT (SELECT count(*) FROM entrada)::int AS recebidos,\n       (SELECT count(*) FROM novos)::int AS novos_na_fila,\n       (SELECT count(*) FROM exclusivos)::int AS exclusivos_agendados;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json.fila)] }}"
+        }
+      },
+      "id": "35c23c4c-0d55-444b-83fe-98abcd061daf",
+      "name": "Gravar fila de aniversários",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $(\"Montar fila de aniversários\").first().json.ignorados.sem_presente > 0 && $(\"Ler configuração\").first().json.disparos_ativos === true }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "375ccf01-cc46-4bd3-92aa-9c529e54fe0c",
+      "name": "Falta benefício de aniversário?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1344,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "errorMessage": "=Presente de aniversário não cadastrado para {{ $(\"Montar fila de aniversários\").first().json.meses_sem_presente.join(\" e \") }}. {{ $(\"Montar fila de aniversários\").first().json.ignorados.sem_presente }} aniversariante(s) de {{ $(\"Montar fila de aniversários\").first().json.periodo }} ficaram fora da fila. Cadastre o presente no painel, em Envios > Presentes de aniversário. O agendador tenta de novo todo dia às 7h; quem faz aniversário hoje já ficou sem os parabéns."
+      },
+      "id": "ec30a4fd-5fe4-4d17-a576-253893eb1c1d",
+      "name": "Alertar benefício não configurado",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1568,
+        -96
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/v25.0/{{ $json.phone_number_id }}?fields=quality_rating,display_phone_number,verified_name",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "whatsAppApi",
+        "options": {}
+      },
+      "id": "d005b7f3-77b2-4970-a8b7-5a06e3ef1fad",
+      "name": "Conferir qualidade do número",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        448,
+        304
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ [\"RED\", \"YELLOW\"].includes(String($json.quality_rating ?? \"\").toUpperCase()) }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "aa1a8bdd-2189-4264-a926-2cc767164540",
+      "name": "Qualidade baixa?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        672,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "errorMessage": "=A qualidade do número {{ $json.display_phone_number ?? '' }} ({{ $json.verified_name ?? '' }}) na Meta está {{ $json.quality_rating }}. Com qualidade baixa, a Meta reduz o alcance e pode pausar os modelos. Avalie pausar as campanhas no Supabase (campanhas.status = 'pausada') e rever texto e frequência."
+      },
+      "id": "13ef5f35-da65-4f50-8207-75b1ad6707e0",
+      "name": "Alertar qualidade do número",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        896,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Aniversários · planejador\nTodo dia às 7h (Brasília):\n1. Lê a configuração em **config_disparos** e os presentes do mês em **presentes_aniversario** (Supabase).\n2. Pede ao Base44 (**publicoDisparos**) os aniversariantes de hoje a daqui a 6 dias. A data vem de EligibleClient.data_nascimento, uma pessoa por e-mail.\n3. Monta a fila: um envio por celular por ano, sempre no dia do aniversário (o modelo diz \"Hoje\"), em horário sorteado dentro da janela. Ficam de fora PJ, inativos, sem celular, o centralizador, celular repetido, quem pediu para sair, quem faz aniversário num dia fora de janela_aniversario_dias e, com exigir_aceite, quem não aceitou.\n4. Grava em **disparos**. Quem envia é o workflow \"Campanhas · Enviador\", que cancela o aniversário que não sair no dia.\n\nO presente é o do mês do aniversário, cadastrado pela corretora no painel (Envios > Presentes de aniversário): o da categoria do cliente ou, sem ele, o de todas. Mês sem presente: o cliente não entra na fila; com os disparos ligados, isso gera alerta. Presente exclusivo de um cliente (**presentes_aniversario_cliente**, mesma tela): vale uma vez, no lugar do presente do mês, mesmo num mês sem presente; ao entrar na fila, fica ligado ao envio (disparo_id).\nRamo de baixo: alerta se a qualidade do número na Meta cair para amarelo ou vermelho.",
+        "height": 324,
+        "width": 1180,
+        "color": 7
+      },
+      "id": "ae7fcdcd-11eb-44f3-99a4-409f29412e21",
+      "name": "Nota - Aniversários",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        192,
+        -416
+      ]
+    }
+  ],
+  "connections": {
+    "Todo dia às 7h": {
+      "main": [
+        [
+          {
+            "node": "Ler configuração",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler configuração": {
+      "main": [
+        [
+          {
+            "node": "Calcular período",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Conferir qualidade do número",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calcular período": {
+      "main": [
+        [
+          {
+            "node": "Buscar aniversariantes (Base44)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar aniversariantes (Base44)": {
+      "main": [
+        [
+          {
+            "node": "Montar fila de aniversários",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar fila de aniversários": {
+      "main": [
+        [
+          {
+            "node": "Gravar fila de aniversários",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gravar fila de aniversários": {
+      "main": [
+        [
+          {
+            "node": "Falta benefício de aniversário?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Falta benefício de aniversário?": {
+      "main": [
+        [
+          {
+            "node": "Alertar benefício não configurado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conferir qualidade do número": {
+      "main": [
+        [
+          {
+            "node": "Qualidade baixa?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qualidade baixa?": {
+      "main": [
+        [
+          {
+            "node": "Alertar qualidade do número",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Sao_Paulo",
+    "binaryMode": "separate"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

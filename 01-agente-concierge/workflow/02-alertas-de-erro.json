@@ -1,0 +1,180 @@
+{
+  "name": "Agente Concierge · Alertas de erro",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "5353cca9-3ea9-4414-aa1d-8f45f535d453",
+      "name": "Quando o agente falhar",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const e = $input.first().json;\nconst exec = e.execution ?? {};\nconst wf = e.workflow ?? {};\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst quando = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });\nconst mensagem = exec.error?.message ?? 'Erro sem mensagem';\nconst no = exec.lastNodeExecuted ?? exec.error?.node?.name ?? 'desconhecido';\nlet html = '<h2>Erro no ' + esc(wf.name) + '</h2>';\nhtml += '<p><b>Quando:</b> ' + esc(quando) + ' (Brasília)</p>';\nhtml += '<p><b>Nó:</b> ' + esc(no) + '</p>';\nhtml += '<p><b>Mensagem:</b> ' + esc(mensagem) + '</p>';\nhtml += '<p><b>Execução:</b> ' + esc(exec.id) + ' (' + esc(exec.mode) + ')</p>';\nif (exec.url) html += '<p><a href=\"' + esc(exec.url) + '\">Abrir a execução no n8n</a></p>';\nif (exec.error?.stack) html += '<pre style=\"font-size:12px;white-space:pre-wrap\">' + esc(String(exec.error.stack).slice(0, 3000)) + '</pre>';\n// Alertas iguais (mesmo nó e mesma mensagem, sem os números) saem no máximo um a cada 15 min.\n// Os alertas de envio ao assessor já chegam deduplicados por item, então sempre saem.\nconst unico = no === 'Alertar falha de envio ao assessor';\nconst assinatura = (no + '|' + mensagem).replace(/\\d+/g, '#').replace(/\\s+/g, ' ').slice(0, 200);\nconst sufixo = unico ? 'exec:' + exec.id : assinatura + ':' + Math.floor(Date.now() / 900000);\nconst chave = 'concierge-alerta-erro:' + sufixo;\nif (!unico) html += '<p style=\"color:#666\">Alertas iguais a este nos próximos 15 minutos não serão enviados.</p>';\n\n// Painel da corretora: o alerta em linguagem simples. As mensagens dos nós \"Alertar…\" e \"Registrar falha…\"\n// são escritas para pessoas; nos demais erros, o texto técnico fica só para o suporte.\nconst CATALOGO = {\n  'Registrar falha do agente': ['O Concierge não conseguiu responder um cliente', 'critico', 'atendimento', 'O suporte já foi avisado. Confira a conversa do cliente e, se preciso, peça para a equipe falar com ele.'],\n  'Registrar falha na validação': ['O app do Concierge não respondeu ao confirmar um cliente', 'critico', 'atendimento', 'O suporte já foi avisado. Clientes que ainda não se identificaram podem não conseguir entrar até isso ser resolvido.'],\n  'Alertar mensagem não entregue': ['Uma resposta do Concierge não chegou ao cliente', 'atencao', 'atendimento', 'Confira a conversa e veja se o cliente precisa de outro contato.'],\n  'Alertar falha de envio ao assessor': ['Aviso de pedido ou resumo não enviado', 'atencao', 'pedidos', 'Confira o pedido na tela Pedidos e avise a central, se preciso.'],\n  'Alertar campanha pausada': ['Campanha pausada: a Meta recusou o texto ou a conta', 'critico', 'envios', 'O suporte confere o modelo ou a conta na Meta. Depois, a campanha é retomada na tela Envios.'],\n  'Alertar freio do enviador': ['Envio pausado por muitas falhas', 'atencao', 'envios', 'O suporte confere as falhas antes de retomar a campanha.'],\n  'Alertar benefício não configurado': ['Aniversários sem presente definido', 'atencao', 'envios', 'Defina com o suporte o presente de aniversário de cada categoria.'],\n  'Alertar qualidade do número': ['Qualidade do número em amarelo ou vermelho', 'atencao', 'envios', 'Reduza os envios de campanha até a qualidade voltar ao verde.'],\n};\nconst nomeWf = String(wf.name ?? '');\nconst areaWf = /Campanhas/i.test(nomeWf) ? 'envios' : /Base de conhecimento/i.test(nomeWf) ? 'base' : /Agente/i.test(nomeWf) ? 'atendimento' : 'geral';\nconst TITULO_AREA = { envios: 'Erro técnico nos envios', base: 'Erro técnico na base de conhecimento', atendimento: 'Erro técnico no atendimento', geral: 'Erro técnico' };\nconst item = CATALOGO[no];\nlet gravidade = item ? item[1] : areaWf === 'atendimento' ? 'atencao' : 'info';\nif (no === 'Alertar qualidade do número' && /RED|vermelh/i.test(mensagem)) gravidade = 'critico';\nconst painel = {\n  chave: sufixo,\n  tipo: item ? no : 'erro_tecnico',\n  gravidade,\n  area: item ? item[2] : areaWf,\n  titulo: item ? item[0] : TITULO_AREA[areaWf],\n  mensagem: item ? String(mensagem).slice(0, 500) : '',\n  acao: item ? item[3] : 'O suporte técnico já foi avisado por e-mail.',\n  workflow: nomeWf,\n  no,\n  execucao_id: String(exec.id ?? ''),\n  execucao_url: String(exec.url ?? ''),\n  detalhe: JSON.stringify({ mensagem: String(mensagem).slice(0, 2000), modo: exec.mode ?? null, pilha: exec.error?.stack ? String(exec.error.stack).slice(0, 3000) : null }),\n};\nreturn [{ json: { assunto: '[Agente Concierge] Erro em ' + no, html, chave, painel } }];"
+      },
+      "id": "d5c8adb8-4e40-40e0-8745-f1a61111c9ff",
+      "name": "Montar alerta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "{{EMAIL_DOS_ALERTAS}}",
+        "subject": "={{ $('Montar alerta').first().json.assunto }}",
+        "message": "={{ $('Montar alerta').first().json.html }}",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "Agente Concierge - Alertas"
+        }
+      },
+      "id": "044c08ca-b61f-4dd3-be38-99309d59a66f",
+      "name": "Enviar alerta por e-mail",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        928,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "operation": "incr",
+        "key": "={{ $json.chave }}",
+        "expire": true,
+        "ttl": 900
+      },
+      "id": "a8e522be-f87b-4c39-bf28-c41f29ea2365",
+      "name": "Contar alertas iguais (Redis)",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "9d1c8a52-6f0e-4b8e-9a51-3f0f2a7e1c11",
+              "leftValue": "={{ !(Number(Object.values($json)[0]) > 1) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "90b88ecc-c96a-4ca3-a5aa-d5efd71bbabf",
+      "name": "Primeiro alerta igual?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        704,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO alertas (chave, tipo, gravidade, area, titulo, mensagem, acao_sugerida, workflow, no, execucao_id, execucao_url, detalhe_tecnico)\nVALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10, NULLIF($11, ''), $12::jsonb)\nON CONFLICT (chave) DO UPDATE\nSET ocorrencias = alertas.ocorrencias + 1,\n    ultima_em = now(),\n    mensagem = COALESCE(EXCLUDED.mensagem, alertas.mensagem),\n    execucao_id = EXCLUDED.execucao_id,\n    execucao_url = EXCLUDED.execucao_url,\n    detalhe_tecnico = EXCLUDED.detalhe_tecnico,\n    -- Voltou a acontecer depois de resolvido: reabre.\n    status = CASE WHEN alertas.status = 'resolvido' THEN 'aberto' ELSE alertas.status END,\n    atualizado_em = now()\nRETURNING id, ocorrencias;",
+        "options": {
+          "queryReplacement": "={{ [$json.painel.chave, $json.painel.tipo, $json.painel.gravidade, $json.painel.area, $json.painel.titulo, $json.painel.mensagem, $json.painel.acao, $json.painel.workflow, $json.painel.no, $json.painel.execucao_id, $json.painel.execucao_url, $json.painel.detalhe] }}"
+        }
+      },
+      "id": "d9c7b774-1f44-4f8f-9301-8f4228426a06",
+      "name": "Registrar alerta no painel",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        480,
+        220
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Quando o agente falhar": {
+      "main": [
+        [
+          {
+            "node": "Montar alerta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar alerta": {
+      "main": [
+        [
+          {
+            "node": "Contar alertas iguais (Redis)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Registrar alerta no painel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contar alertas iguais (Redis)": {
+      "main": [
+        [
+          {
+            "node": "Primeiro alerta igual?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Primeiro alerta igual?": {
+      "main": [
+        [
+          {
+            "node": "Enviar alerta por e-mail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

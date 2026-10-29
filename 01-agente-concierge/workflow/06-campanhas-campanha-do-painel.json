@@ -1,0 +1,344 @@
+{
+  "name": "Campanhas · Campanha do painel",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Campanha do painel\nTela Nova campanha do painel: qualquer mensagem aprovada na Meta (tabela modelos_meta), para as categorias escolhidas.\n- **Webhook** POST /webhook/concierge-campanha-painel, header x-painel-token: { canal: \"painel\", modo: \"teste\" | \"publico\", pedido_id, titulo, modelo_id, variaveis: [{ n, origem: \"nome\" | \"fixo\", valor }], categorias, nao_repetir, inicio?, criada_por }. Na dúvida, é teste; a confirmação (digitar ENVIAR) fica na tela.\n- Teste: só config_disparos.telefones_teste. Para os clientes: público do Base44 (publicoDisparos), sem quem pediu para sair, sem quem já recebeu a mesma mensagem (\"não repetir\") e com o intervalo mínimo entre campanhas.\n- Grava a campanha (tipo \"campanha\") e a fila; quem envia é o \"Campanhas · Enviador\". O mesmo pedido (pedido_id) não cria duas campanhas. Com o modo teste ligado, a campanha para os clientes nasce pausada.",
+        "color": 7,
+        "width": 760,
+        "height": 300
+      },
+      "id": "12bfe801-7350-4c1b-9b30-6a6372d0c0a1",
+      "name": "Sticky Note 4d2596b6",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -400
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "concierge-campanha-painel",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b6dd49e5-89ba-4b13-8d61-3565dde06c38",
+      "name": "Webhook: painel",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT to_jsonb(c) AS cfg, to_jsonb(m) AS modelo\nFROM config_disparos c\nLEFT JOIN modelos_meta m ON m.id = $1 AND m.existe_na_meta\nWHERE c.id = 1;",
+        "options": {
+          "queryReplacement": "={{ [String($json.body?.modelo_id ?? '')] }}"
+        }
+      },
+      "id": "d41bc13e-1b9d-4de4-b845-a7e6649ff250",
+      "name": "Ler configuração e mensagem",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        224,
+        80
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pedido da tela Nova campanha do painel, com qualquer mensagem aprovada na Meta. Na dúvida, é teste:\n// só vai aos clientes com modo = \"publico\" (a confirmação, digitar ENVIAR, fica na tela do painel).\nconst ZONA = 'America/Sao_Paulo';\nconst b = $('Webhook: painel').first().json.body ?? {};\nconst ent = $input.first().json;\nconst linha = (s) => String(s ?? '').replace(/\\s+/g, ' ').trim();\nconst MAPA = { bronze: 'Bronze', prata: 'Prata', ouro: 'Ouro', diamante: 'Diamante', legado: 'Diamante' };\nconst TODAS = ['Bronze', 'Prata', 'Ouro', 'Diamante'];\nconst erros = [];\nif (ent.error) erros.push('Não foi possível ler a mensagem no banco. Confira se as tabelas do painel foram criadas no Postgres.');\nconst m = ent.modelo ?? null;\n\nconst teste = linha(b.modo).toLowerCase() !== 'publico';\nconst pedidoId = linha(b.pedido_id);\nconst titulo = linha(b.titulo);\nlet lista = b.categorias;\nif (typeof lista === 'string') lista = lista.split(',');\nif (!Array.isArray(lista)) lista = [];\nconst marcadas = new Set(lista.map((c) => MAPA[linha(c).toLowerCase()]).filter(Boolean));\nconst categorias = TODAS.filter((c) => marcadas.has(c));\n\nif (!/^[A-Za-z0-9-]{8,64}$/.test(pedidoId)) erros.push('Pedido sem identificação. Recarregue a tela e tente de novo.');\nif (!titulo || titulo.length > 120) erros.push('O nome da campanha precisa ter de 1 a 120 caracteres.');\nif (!categorias.length) erros.push('Escolha ao menos uma categoria.');\nif (!ent.error && !m) erros.push('Mensagem não encontrada. Atualize a lista na tela Mensagens.');\nif (m && m.status !== 'APPROVED') erros.push('A mensagem \"' + (m.titulo || m.nome) + '\" não está aprovada pela Meta.');\nif (m && m.suportado === false) erros.push(m.observacao || 'Esta mensagem não pode ser usada em campanha.');\n\n// Um valor por {{n}} do corpo, na ordem: o primeiro nome do cliente ou um texto fixo da campanha.\nconst qtd = m && Array.isArray(m.variaveis) ? m.variaveis.length : 0;\nconst recebidos = Array.isArray(b.variaveis) ? b.variaveis : [];\nconst campos = [];\nfor (let n = 1; n <= qtd; n++) {\n  const v = recebidos.find((x) => Number(x?.n) === n) ?? {};\n  const origem = linha(v.origem) === 'nome' ? 'nome' : 'fixo';\n  const valor = origem === 'nome' ? '' : linha(v.valor);\n  if (origem === 'fixo' && !valor) erros.push('Preencha o campo {{' + n + '}} da mensagem.');\n  if (valor.length > 300) erros.push('O campo {{' + n + '}} pode ter até 300 caracteres.');\n  campos.push({ n, origem, valor });\n}\n\nconst agora = DateTime.now().setZone(ZONA);\nlet inicio = agora;\nconst textoInicio = linha(b.inicio);\nif (textoInicio) {\n  const d = /^\\d{4}-\\d{2}-\\d{2}$/.test(textoInicio) ? DateTime.fromISO(textoInicio, { zone: ZONA }).startOf('day') : DateTime.fromISO(textoInicio, { zone: ZONA });\n  if (!d.isValid) erros.push('Data de início inválida: ' + textoInicio + '.');\n  else if (d > agora) inicio = d;\n}\n\nreturn [{ json: {\n  ok: erros.length === 0,\n  erros: [...new Set(erros)],\n  origem: 'painel',\n  teste,\n  // A chave impede criar a mesma campanha duas vezes (clique duplo, envio repetido); o painel gera um ID por pedido.\n  chave: (teste ? 'teste-' : '') + 'painel-' + pedidoId,\n  titulo: teste ? 'Teste · ' + titulo : titulo,\n  categorias,\n  campos,\n  nao_repetir: b.nao_repetir !== false,\n  inicio: inicio.toUTC().toISO(),\n  criada_por: linha(b.criada_por),\n  modelo: m ? { id: m.id, nome: m.nome, idioma: m.idioma, titulo: m.titulo, cabecalho: m.cabecalho, corpo: m.corpo, rodape: m.rodape, botoes: m.botoes || [] } : null,\n} }];"
+      },
+      "id": "003886db-0309-494c-b3de-20b3342cc1f4",
+      "name": "Validar pedido",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a26f59a0-4631-4624-bfd0-31cb55cad4d2",
+      "name": "Pedido válido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        672,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.teste }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "22ebe38e-3dd3-4a58-a230-07cafc65e9b6",
+      "name": "É teste?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        896,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const linha = (s) => String(s ?? '').replace(/\\s+/g, ' ').trim();\nconst CATEGORIAS = { bronze: 'Bronze', prata: 'Prata', ouro: 'Ouro', legado: 'Diamante', diamante: 'Diamante' };\nfunction celular(v) {\n  let n = String(v ?? '').replace(/\\D/g, '').replace(/^0+/, '');\n  if (n.length === 10 || n.length === 11) n = '55' + n;\n  // Celular brasileiro sem o nono dígito: 55 + DDD + 8 dígitos começando em 6 a 9.\n  if (/^55\\d{2}[6-9]\\d{7}$/.test(n)) n = n.slice(0, 4) + '9' + n.slice(4);\n  return /^\\d{12,15}$/.test(n) ? n : '';\n}\n\nconst cfg = $('Ler configuração e mensagem').first().json.cfg;\nconst pedido = $('Validar pedido').first().json;\nconst m = pedido.modelo;\nconst suporte = celular(cfg.whatsapp_suporte);\nconst ignorados = { inativo: 0, fora_da_categoria: 0, sem_celular: 0, centralizador: 0, sem_aceite: 0, sem_nome: 0, repetido: 0 };\nconst candidatos = [];\nlet totalBase44 = 0;\n\nif (pedido.teste) {\n  // Teste: só os telefones de config_disparos.telefones_teste, com o nome \"Teste\".\n  for (const t of Array.isArray(cfg.telefones_teste) ? cfg.telefones_teste : []) {\n    const telefone = celular(t);\n    if (telefone && !candidatos.some((c) => c.telefone === telefone)) {\n      candidatos.push({ cliente_id: 'teste:' + telefone, telefone, primeiro_nome: 'Teste', categoria: null });\n    }\n  }\n} else {\n  // O Base44 devolve { clientes: [...] }; se vier uma lista solta, o n8n já separou em itens.\n  const itens = $input.all().map((i) => i.json);\n  const clientes = itens.length === 1 && Array.isArray(itens[0].clientes) ? itens[0].clientes : itens.filter((c) => c && c.cliente_id);\n  totalBase44 = clientes.length;\n  const ids = new Set();\n  const telefones = new Set();\n  for (const c of clientes) {\n    const id = linha(c.cliente_id);\n    if (!id) continue;\n    if (c.ativo === false) { ignorados.inativo++; continue; }\n    const categoria = CATEGORIAS[linha(c.categoria).toLowerCase()] || '';\n    if (!pedido.categorias.includes(categoria)) { ignorados.fora_da_categoria++; continue; }\n    const telefone = celular(c.celular);\n    if (!telefone) { ignorados.sem_celular++; continue; }\n    if (suporte && telefone === suporte) { ignorados.centralizador++; continue; }\n    if (cfg.exigir_aceite === true && c.aceita_comunicacao !== true) { ignorados.sem_aceite++; continue; }\n    const nome = linha(c.primeiro_nome).split(' ')[0];\n    if (!nome) { ignorados.sem_nome++; continue; }\n    if (ids.has(id) || telefones.has(telefone)) { ignorados.repetido++; continue; }\n    ids.add(id);\n    telefones.add(telefone);\n    candidatos.push({ cliente_id: id, telefone, primeiro_nome: nome, categoria });\n  }\n}\n\n// O texto completo fica no disparo para o agente saber o que o cliente recebeu.\nconst renderizar = (texto, vars) => String(texto || '').replace(/\\{\\{\\s*(\\d+)\\s*\\}\\}/g, (_, n) => vars[Number(n) - 1] ?? '');\nconst textoCompleto = (vars) => [\n  m.cabecalho ? '*' + m.cabecalho + '*' : '',\n  renderizar(m.corpo, vars),\n  m.rodape ? '_' + m.rodape + '_' : '',\n  (m.botoes || []).length ? 'Botões: ' + m.botoes.map((x) => (x.tipo === 'link' ? x.texto + ' (' + x.url + ')' : x.texto)).join(' | ') : '',\n].filter(Boolean).join('\\n\\n');\n\nconst fila = candidatos.map((c) => {\n  const variaveis = pedido.campos.map((v) => (v.origem === 'nome' ? c.primeiro_nome : v.valor));\n  return { ...c, variaveis, texto: textoCompleto(variaveis) };\n});\nconst payload = {\n  chave: pedido.chave,\n  titulo: pedido.titulo,\n  teste: pedido.teste,\n  modelo_nome: m.nome,\n  modelo_idioma: m.idioma,\n  nao_repetir: pedido.nao_repetir,\n  parametros: { modelo_id: m.id, modelo_titulo: m.titulo || m.nome, campos: pedido.campos, nao_repetir: pedido.nao_repetir },\n  publico: { categorias: pedido.categorias, total_base44: totalBase44, ignorados },\n  origem: pedido.origem,\n  criada_por: pedido.criada_por,\n  inicio: pedido.inicio,\n  fila,\n};\nreturn [{ json: { payload: JSON.stringify(payload), total_base44: totalBase44, na_lista: fila.length, ignorados } }];"
+      },
+      "id": "34cec87d-a48c-414f-bc84-80bb995675e2",
+      "name": "Montar fila da campanha",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "{{URL_DO_APP_DO_CLIENTE}}/functions/publicoDisparos",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ acao: \"publico\", categorias: $(\"Validar pedido\").first().json.categorias }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "6702f1d7-6271-49c9-8246-abb8687eda87",
+      "name": "Buscar público (Base44)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1120,
+        80
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Resposta ao painel: o que foi criado, quem ficou de fora e quando os envios começam.\nconst ZONA = 'America/Sao_Paulo';\nconst pedido = $('Validar pedido').first().json;\nconst quando = (iso) => DateTime.fromISO(new Date(iso).toISOString()).setZone(ZONA).toFormat(\"dd/MM/yyyy 'às' HH:mm\");\nconst saida = (http_status, titulo, mensagem, extra = {}) => [{ json: { http_status, resposta: { ok: http_status === 200, titulo, mensagem, ...extra } } }];\n\nif (!pedido.ok) return saida(400, 'A campanha não foi criada', pedido.erros.join(' '), { erros: pedido.erros });\nconst r = $input.first().json;\nif (!r.campanha_id) {\n  const msg = 'Esta campanha já foi criada (campanha #' + r.campanha_existente_id + '). Nada foi criado de novo.';\n  return saida(409, 'Campanha já criada', msg, { erros: [msg], campanha_id: r.campanha_existente_id });\n}\nconst extra = { campanha_id: r.campanha_id, teste: pedido.teste, na_fila: r.na_fila, status: r.status };\nconst avisos = [];\nif (!r.disparos_ativos) avisos.push('Os envios estão desligados: nada sai até o suporte ligar.');\nif (pedido.teste) {\n  if (!r.na_fila) avisos.push('Não há celulares de teste cadastrados. Peça ao suporte para cadastrar.');\n  return saida(200, 'Teste criado', ['Teste criado (campanha #' + r.campanha_id + '): ' + r.na_fila + ' celular(es) de teste. A mensagem sai na próxima rodada de envio, em até 5 minutos.', ...avisos].join(' '), extra);\n}\nconst partes = ['Campanha #' + r.campanha_id + ' criada com ' + r.na_fila + ' cliente(s) na fila (' + pedido.categorias.join(', ') + ').'];\nif (r.adiados_por_frequencia) partes.push(r.adiados_por_frequencia + ' recebem depois do intervalo mínimo entre campanhas.');\nif (r.ja_receberam) partes.push(r.ja_receberam + ' já tinham recebido esta mensagem e ficaram de fora.');\nif (r.sairam) partes.push(r.sairam + ' pediram para não receber e ficaram de fora.');\nif (r.primeiro_envio) partes.push('Os envios começam a partir de ' + quando(r.primeiro_envio) + ', no horário de envio, até ' + r.limite_diario + ' por dia somando todas as campanhas.');\nif (r.status === 'pausada') avisos.push('ATENÇÃO: a campanha foi criada PAUSADA porque o modo teste está ligado. Peça ao suporte para desligar e depois retome a campanha na tela Envios.');\nif (!r.publico) avisos.push('O app não devolveu nenhum cliente dessas categorias.');\nreturn saida(200, r.status === 'pausada' ? 'Campanha criada, mas pausada' : 'Campanha criada', [...partes, ...avisos].join(' '), extra);"
+      },
+      "id": "16edee9d-d3e1-4dfa-8958-b60ada35ddcb",
+      "name": "Montar resposta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1792,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH cfg AS (\n  SELECT * FROM config_disparos WHERE id = 1\n), p AS (\n  SELECT $1::jsonb AS j, ($1::jsonb->>'teste')::boolean AS teste, coalesce(($1::jsonb->>'nao_repetir')::boolean, true) AS nao_repetir\n), camp AS (\n  -- Com o modo teste ligado, uma campanha para os clientes nasce pausada, em vez de virar \"simulado\".\n  INSERT INTO campanhas (tipo, chave, titulo, modelo_nome, modelo_idioma, teste, parametros, publico, origem, criada_por, status, observacao)\n  SELECT 'campanha', p.j->>'chave', p.j->>'titulo', p.j->>'modelo_nome', p.j->>'modelo_idioma', p.teste,\n         p.j->'parametros', p.j->'publico', p.j->>'origem', p.j->>'criada_por',\n         CASE WHEN NOT p.teste AND cfg.modo_teste THEN 'pausada' ELSE 'em_andamento' END,\n         CASE WHEN NOT p.teste AND cfg.modo_teste THEN 'Criada pausada: o modo teste estava ligado na hora do envio.' END\n  FROM p CROSS JOIN cfg\n  ON CONFLICT (chave) DO NOTHING\n  RETURNING id, teste, status\n), entrada AS (\n  SELECT x.* FROM p CROSS JOIN jsonb_to_recordset(p.j->'fila') AS x(cliente_id text, telefone text, primeiro_nome text, categoria text, variaveis jsonb, texto text)\n), sairam AS (\n  SELECT e.cliente_id FROM entrada e CROSS JOIN p\n  WHERE NOT p.teste AND EXISTS (SELECT 1 FROM comunicacao_atual ca WHERE ca.chave IN (e.cliente_id, e.telefone) AND ca.situacao = 'optout')\n), ja_receberam AS (\n  -- \"Não repetir\": quem já recebeu esta mesma mensagem numa campanha de verdade fica de fora.\n  SELECT e.cliente_id FROM entrada e CROSS JOIN p\n  WHERE NOT p.teste AND p.nao_repetir AND e.cliente_id NOT IN (SELECT cliente_id FROM sairam) AND EXISTS (\n    SELECT 1 FROM disparos d2 JOIN campanhas c2 ON c2.id = d2.campanha_id\n    WHERE NOT c2.teste AND c2.modelo_nome = p.j->>'modelo_nome' AND (d2.cliente_id = e.cliente_id OR d2.telefone = e.telefone)\n      AND d2.status NOT IN ('falhou', 'cancelado', 'simulado'))\n), novos AS (\n  -- Quem recebeu outra campanha há pouco recebe esta depois do intervalo mínimo (o aniversário não conta).\n  INSERT INTO disparos (campanha_id, cliente_id, telefone, primeiro_nome, categoria, variaveis, texto, agendado_para)\n  SELECT c.id, e.cliente_id, e.telefone, e.primeiro_nome, e.categoria, e.variaveis, e.texto,\n         CASE WHEN c.teste THEN now()\n              ELSE GREATEST((p.j->>'inicio')::timestamptz, COALESCE((\n                SELECT max(COALESCE(d2.enviado_em, d2.agendado_para))\n                FROM disparos d2 JOIN campanhas c2 ON c2.id = d2.campanha_id\n                WHERE c2.tipo <> 'aniversario' AND NOT c2.teste AND d2.cliente_id = e.cliente_id\n                  AND d2.status NOT IN ('falhou', 'simulado', 'cancelado')\n              ) + make_interval(days => cfg.frequencia_minima_dias), (p.j->>'inicio')::timestamptz))\n         END\n  FROM entrada e CROSS JOIN camp c CROSS JOIN cfg CROSS JOIN p\n  WHERE c.teste OR (e.cliente_id NOT IN (SELECT cliente_id FROM sairam) AND e.cliente_id NOT IN (SELECT cliente_id FROM ja_receberam))\n  ON CONFLICT (campanha_id, cliente_id) DO NOTHING\n  RETURNING id, agendado_para\n)\nSELECT (SELECT id FROM camp) AS campanha_id,\n       (SELECT status FROM camp) AS status,\n       (SELECT c.id FROM campanhas c CROSS JOIN p WHERE c.chave = p.j->>'chave') AS campanha_existente_id,\n       (SELECT count(*) FROM entrada)::int AS publico,\n       (SELECT count(*) FROM novos)::int AS na_fila,\n       (SELECT count(*) FROM sairam)::int AS sairam,\n       (SELECT count(*) FROM ja_receberam)::int AS ja_receberam,\n       (SELECT count(*) FROM novos CROSS JOIN p WHERE novos.agendado_para > (p.j->>'inicio')::timestamptz + interval '1 minute')::int AS adiados_por_frequencia,\n       (SELECT min(agendado_para) FROM novos) AS primeiro_envio,\n       (SELECT disparos_ativos FROM cfg) AS disparos_ativos,\n       (SELECT modo_teste FROM cfg) AS modo_teste,\n       (SELECT limite_diario FROM cfg) AS limite_diario;",
+        "options": {
+          "queryReplacement": "={{ [$json.payload] }}"
+        }
+      },
+      "id": "3c68bc8d-5ddf-4bdc-bafc-71d9f2b848c3",
+      "name": "Criar campanha e fila",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1568,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.resposta) }}",
+        "options": {
+          "responseCode": "={{ $json.http_status }}"
+        }
+      },
+      "id": "a6611c8c-5672-4da4-bf31-11c1f33030b0",
+      "name": "Responder ao painel",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2016,
+        80
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: painel": {
+      "main": [
+        [
+          {
+            "node": "Ler configuração e mensagem",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler configuração e mensagem": {
+      "main": [
+        [
+          {
+            "node": "Validar pedido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar pedido": {
+      "main": [
+        [
+          {
+            "node": "Pedido válido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pedido válido?": {
+      "main": [
+        [
+          {
+            "node": "É teste?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Montar resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "É teste?": {
+      "main": [
+        [
+          {
+            "node": "Montar fila da campanha",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar público (Base44)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar fila da campanha": {
+      "main": [
+        [
+          {
+            "node": "Criar campanha e fila",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar público (Base44)": {
+      "main": [
+        [
+          {
+            "node": "Montar fila da campanha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar resposta": {
+      "main": [
+        [
+          {
+            "node": "Responder ao painel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Criar campanha e fila": {
+      "main": [
+        [
+          {
+            "node": "Montar resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Sao_Paulo"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

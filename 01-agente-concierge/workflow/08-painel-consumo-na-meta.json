@@ -1,0 +1,265 @@
+{
+  "name": "Painel · Consumo na Meta",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "b69f0cb3-94ca-463b-8d50-877e33cf2933",
+      "name": "A cada 6 horas",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT waba_id FROM config_disparos WHERE id = 1;",
+        "options": {}
+      },
+      "id": "85a59631-9f42-42c2-9166-8f97cbe9b8b1",
+      "name": "Ler configuração",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ String($json.waba_id ?? \"\").trim() !== \"\" }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "59e1bdf9-d691-4c04-9dc3-5a11fa0d1caf",
+      "name": "Conta informada?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Do 1º dia do mês anterior até agora: a Meta ainda ajusta os números dos dias recentes.\nconst cfg = $input.first().json;\nconst agora = new Date();\nconst inicio = Date.UTC(agora.getUTCFullYear(), agora.getUTCMonth() - 1, 1) / 1000;\nconst fim = Math.floor(agora.getTime() / 1000);\nconst campos = 'currency,pricing_analytics.start(' + inicio + ').end(' + fim + ').granularity(DAILY).dimensions([\"PRICING_CATEGORY\",\"PRICING_TYPE\"])';\nreturn [{ json: { waba: String(cfg.waba_id).trim(), inicio, fim, campos, dia_inicio: new Date(inicio * 1000).toISOString().slice(0, 10) } }];"
+      },
+      "id": "cc6f9360-f73d-44ba-b4e3-91d30e2113e9",
+      "name": "Montar período",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v25.0/{{ $json.waba }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "whatsAppApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "={{ $json.campos }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "65b84452-29df-4e94-8685-4ee9df691850",
+      "name": "Buscar consumo na Meta",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        880,
+        -20
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Uma linha por dia, categoria e tipo (cobrada ou grátis), com volume e custo na moeda da conta.\nconst r = $input.first().json;\nif (!r.pricing_analytics) throw new Error('A Meta não devolveu pricing_analytics. Confira o ID da conta (waba_id) e a permissão do token.');\nconst moeda = r.currency || null;\nconst soma = new Map();\nfor (const bloco of r.pricing_analytics.data || []) {\n  for (const p of bloco.data_points || []) {\n    const dia = new Date(Number(p.start) * 1000).toISOString().slice(0, 10);\n    const categoria = p.pricing_category || 'DESCONHECIDA';\n    const tipo = p.pricing_type || 'REGULAR';\n    const chave = dia + '|' + categoria + '|' + tipo;\n    const l = soma.get(chave) || { dia, categoria, tipo, volume: 0, custo: 0, moeda };\n    l.volume += Number(p.volume || 0);\n    l.custo += Number(p.cost || 0);\n    soma.set(chave, l);\n  }\n}\nconst linhas = [...soma.values()];\nreturn [{ json: { linhas: linhas.length, moeda, payload: JSON.stringify(linhas), dia_inicio: $('Montar período').first().json.dia_inicio } }];"
+      },
+      "id": "0aae2c0e-038d-4e86-b096-98fefe5f5114",
+      "name": "Montar linhas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH entrada AS (\n  SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(dia date, categoria text, tipo text, volume int, custo numeric, moeda text)\n), gravados AS (\n  INSERT INTO meta_consumo (dia, categoria, tipo, volume, custo, moeda, atualizado_em)\n  SELECT dia, categoria, tipo, volume, custo, moeda, now() FROM entrada\n  ON CONFLICT (dia, categoria, tipo) DO UPDATE\n  SET volume = EXCLUDED.volume, custo = EXCLUDED.custo, moeda = EXCLUDED.moeda, atualizado_em = now()\n  RETURNING 1\n), zerados AS (\n  -- O que a Meta deixou de devolver no período fica zerado: ela corrige os números dos dias recentes.\n  UPDATE meta_consumo m SET volume = 0, custo = 0, atualizado_em = now()\n  WHERE m.dia >= $2::date AND (m.volume <> 0 OR m.custo <> 0)\n    AND NOT EXISTS (SELECT 1 FROM entrada e WHERE e.dia = m.dia AND e.categoria = m.categoria AND e.tipo = m.tipo)\n  RETURNING 1\n)\nSELECT (SELECT count(*) FROM gravados)::int AS gravados, (SELECT count(*) FROM zerados)::int AS zerados;",
+        "options": {
+          "queryReplacement": "={{ [$json.payload, $json.dia_inicio] }}"
+        }
+      },
+      "id": "aa6552ef-71c6-402a-8c09-6ad2cb425267",
+      "name": "Gravar consumo",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1320,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH cfg AS (\n  SELECT orcamento_meta_mensal AS limite FROM config_disparos WHERE id = 1\n), mes AS (\n  SELECT coalesce(sum(custo), 0) AS gasto, coalesce(max(moeda), 'BRL') AS moeda\n  FROM meta_consumo WHERE dia >= date_trunc('month', now() AT TIME ZONE 'UTC')::date\n), nivel AS (\n  SELECT CASE WHEN cfg.limite > 0 AND mes.gasto >= cfg.limite THEN 100\n              WHEN cfg.limite > 0 AND mes.gasto >= cfg.limite * 0.8 THEN 80 END AS n,\n         cfg.limite, mes.gasto, mes.moeda\n  FROM cfg, mes\n), novo AS (\n  -- Um alerta por nível (80% e 100%) por mês.\n  INSERT INTO alertas (chave, tipo, gravidade, area, titulo, mensagem, acao_sugerida, workflow, no)\n  SELECT 'orcamento-meta-' || to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM') || '-' || n, 'orcamento_meta',\n         CASE WHEN n = 100 THEN 'critico' ELSE 'atencao' END, 'envios',\n         CASE WHEN n = 100 THEN 'O gasto na Meta passou do limite do mês' ELSE 'O gasto na Meta chegou a 80% do limite do mês' END,\n         'Gasto no mês: ' || moeda || ' ' || replace(to_char(gasto, 'FM999999990.00'), '.', ',') || ' de ' || moeda || ' ' || replace(to_char(limite, 'FM999999990.00'), '.', ',') || '.',\n         'Veja o detalhe na tela Consumo. Para gastar menos, pause campanhas na tela Envios.',\n         'Painel · Consumo na Meta', 'Verificar limite de gasto'\n  FROM nivel WHERE n IS NOT NULL\n  ON CONFLICT (chave) DO NOTHING\n  RETURNING id\n)\nSELECT (SELECT n FROM nivel) AS nivel, (SELECT gasto FROM nivel)::float8 AS gasto, (SELECT count(*) FROM novo)::int AS alertas_criados;",
+        "options": {}
+      },
+      "id": "e6705932-d071-4c7f-aecf-c696eb4d3f4d",
+      "name": "Verificar limite de gasto",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1540,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Painel · Consumo na Meta\nA cada 6 horas, busca na Meta quantas mensagens foram contadas e quanto custaram (pricing_analytics da conta do WhatsApp), por dia, categoria e tipo, do 1º dia do mês anterior até agora, e grava em **meta_consumo**. O painel mostra em **Consumo**.\n- Precisa do ID da conta (WABA) em config_disparos.waba_id; sem ele, não faz nada.\n- Usa o token da credencial \"WhatsApp account\" (precisa da permissão whatsapp_business_management).\n- Limite do mês (config_disparos.orcamento_meta_mensal, definido no painel): ao chegar a 80% e a 100%, cria um alerta em **alertas**, uma vez por nível por mês.\n\nLigar depois de criar as tabelas do painel e preencher o waba_id.",
+        "color": 7,
+        "width": 1000,
+        "height": 300
+      },
+      "id": "fbd5009a-6856-4f95-b8e3-1626eac6fd19",
+      "name": "Sticky Note b3d748bf",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -360
+      ]
+    }
+  ],
+  "connections": {
+    "A cada 6 horas": {
+      "main": [
+        [
+          {
+            "node": "Ler configuração",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler configuração": {
+      "main": [
+        [
+          {
+            "node": "Conta informada?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conta informada?": {
+      "main": [
+        [
+          {
+            "node": "Montar período",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar período": {
+      "main": [
+        [
+          {
+            "node": "Buscar consumo na Meta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar consumo na Meta": {
+      "main": [
+        [
+          {
+            "node": "Montar linhas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar linhas": {
+      "main": [
+        [
+          {
+            "node": "Gravar consumo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gravar consumo": {
+      "main": [
+        [
+          {
+            "node": "Verificar limite de gasto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Sao_Paulo"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

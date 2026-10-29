@@ -1,0 +1,942 @@
+{
+  "name": "Concierge · Base de conhecimento",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "concierge-base-conhecimento-painel",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "cbfd1015-1ce8-4710-817e-fa237ba76ae1",
+      "name": "Webhook: painel",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Junta as duas entradas (formulário do n8n e painel) num formato só e valida.\nconst item = $input.first();\nconst ent = item.json;\nconst canal = ent.body && typeof ent.body === 'object' && !Array.isArray(ent.body) ? 'painel' : 'formulario';\nconst b = canal === 'painel' ? ent.body : ent;\nconst linha = (s) => String(s ?? '').replace(/\\s+/g, ' ').trim();\nconst EXTENSOES = ['pdf', 'docx', 'txt', 'md'];\n\nconst acao = canal === 'painel' ? (linha(b.acao).toLowerCase() || 'adicionar') : 'adicionar';\nconst documentoId = linha(b.documento_id);\nconst arquivoUrl = String(b.arquivo_url ?? '').trim();\nlet arquivoNome = linha(b.arquivo_nome);\nif (canal === 'formulario') {\n  const bin = item.binary || {};\n  const chave = Object.keys(bin)[0];\n  arquivoNome = chave ? linha(bin[chave].fileName) : '';\n}\nconst extensao = ((arquivoNome.match(/\\.([a-z0-9]+)$/i) || [])[1] || '').toLowerCase();\nlet titulo = linha(b.titulo ?? b['Título do documento']);\nif (!titulo && acao === 'apagar' && documentoId) titulo = 'Documento #' + documentoId;\n\nconst erros = [];\nif (acao !== 'adicionar' && acao !== 'apagar') erros.push('Ação inválida: use \"adicionar\" ou \"apagar\".');\nif (acao === 'adicionar') {\n  if (!titulo) erros.push('Informe o título do documento.');\n  if (titulo.length > 200) erros.push('O título tem ' + titulo.length + ' caracteres; o limite é 200.');\n  if (!EXTENSOES.includes(extensao)) erros.push('Formato não aceito' + (arquivoNome ? ' (' + arquivoNome + ')' : '') + '. Envie PDF, DOCX, TXT ou MD.');\n  // Só baixa do Storage do Supabase, por link assinado: o webhook não busca endereços quaisquer.\n  if (canal === 'painel' && !/^https:\\/\\/[a-z0-9-]+\\.supabase\\.co\\/storage\\/v1\\/object\\/sign\\//i.test(arquivoUrl)) erros.push('Link do arquivo inválido.');\n}\nif (acao === 'apagar' && !/^(\\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(documentoId)) erros.push('Informe o documento a apagar.');\n\nreturn [{ json: {\n  ok: erros.length === 0,\n  erros,\n  canal,\n  acao,\n  titulo,\n  origem: linha(b.origem ?? b['Origem (opcional)']),\n  enviado_por: canal === 'painel' ? linha(b.enviado_por) : 'Formulário do n8n',\n  documento_id: documentoId,\n  arquivo_url: arquivoUrl,\n  arquivo_nome: arquivoNome,\n  extensao,\n} }];"
+      },
+      "id": "6e1f0dbe-29e9-4cbd-a1be-c950b7d84676",
+      "name": "Normalizar entrada",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "n8nUserAuth",
+        "formTitle": "Base de conhecimento — Concierge",
+        "formDescription": "Envie um documento para a base de conhecimento do agente (regulamentos, perguntas frequentes, informações de parceiros). Se o título já existir, a versão anterior é substituída.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Título do documento",
+              "fieldName": "titulo",
+              "placeholder": "Ex.: Regulamento de benefícios",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Arquivo",
+              "fieldType": "file",
+              "fieldName": "arquivo",
+              "multipleFiles": false,
+              "acceptFileTypes": ".pdf,.docx,.txt,.md",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Origem (opcional)",
+              "fieldName": "origem",
+              "placeholder": "Ex.: Enviado pela equipe corretora em 10/2026"
+            }
+          ]
+        },
+        "options": {
+          "buttonLabel": "Enviar documento",
+          "path": "concierge-base-conhecimento",
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Documento recebido. Ele estará disponível para o agente em alguns instantes."
+            }
+          }
+        }
+      },
+      "id": "e5c07c8c-4833-4ee8-b99f-f54b0a5ea949",
+      "name": "Formulário: enviar documento",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.ok }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e99b4607-0ad2-41c5-875c-dd28cc5e3844",
+      "name": "Pedido válido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        464,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH em_andamento AS (\n  -- Dois envios do mesmo título ao mesmo tempo gravariam a mesma versão duas vezes.\n  SELECT id FROM documentos_envios\n  WHERE titulo = $1 AND status = 'processando' AND criado_em > now() - interval '15 minutes'\n  ORDER BY id DESC LIMIT 1\n), novo AS (\n  INSERT INTO documentos_envios (canal, acao, titulo, origem, arquivo_nome, arquivo_url_recebida, enviado_por, documento_id)\n  SELECT $2, $3, $1, NULLIF($4, ''), NULLIF($5, ''), $6::boolean, NULLIF($7, ''), NULLIF($8, '')\n  WHERE NOT EXISTS (SELECT 1 FROM em_andamento)\n  RETURNING id\n)\nSELECT (SELECT id FROM novo) AS envio_id, (SELECT id FROM em_andamento) AS envio_em_andamento;",
+        "options": {
+          "queryReplacement": "={{ [$json.titulo, $json.canal, $json.acao, $json.origem, $json.arquivo_nome, Boolean($json.arquivo_url), $json.enviado_por, $json.documento_id] }}"
+        }
+      },
+      "id": "8d74d91a-59c2-44b7-80ea-e576f46f4a2b",
+      "name": "Registrar envio",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        688,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ Boolean($json.envio_id) }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d9bae806-c512-4bd6-9e6e-d7cc1f871c30",
+      "name": "Envio registrado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        912,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Normalizar entrada').first().json.canal === \"painel\" }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b4bb2937-d6bb-424c-a0df-b48a52920981",
+      "name": "Veio do painel?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1120,
+        -48
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, envio_id: $('Registrar envio').first().json.envio_id, status: \"processando\" }) }}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "5553f96a-d4a0-472d-859c-09624e044f0b",
+      "name": "Responder ao painel",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1344,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Normalizar entrada').first().json.acao === \"apagar\" }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7cbae005-622b-4e04-b260-d194e7234397",
+      "name": "Apagar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1568,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH alvo AS (\n  SELECT id, titulo FROM documentos WHERE id::text = $1\n), trechos AS (\n  DELETE FROM trechos_documentos t\n  WHERE t.metadata->>'documento_id' = $1 AND EXISTS (SELECT 1 FROM alvo)\n  RETURNING 1\n), apagado AS (\n  DELETE FROM documentos d USING alvo WHERE d.id = alvo.id RETURNING d.titulo\n)\nUPDATE documentos_envios e\nSET status = CASE WHEN EXISTS (SELECT 1 FROM apagado) THEN 'pronto' ELSE 'erro' END,\n    erro = CASE WHEN EXISTS (SELECT 1 FROM apagado) THEN NULL ELSE 'Documento não encontrado. Ele pode já ter sido apagado.' END,\n    titulo = COALESCE((SELECT titulo FROM apagado), e.titulo),\n    documento_id = $1,\n    trechos = (SELECT count(*) FROM trechos)::int,\n    concluido_em = now()\nWHERE e.id = $2::bigint\nRETURNING e.id AS envio_id, e.status, e.trechos;",
+        "options": {
+          "queryReplacement": "={{ [$('Normalizar entrada').first().json.documento_id, $('Registrar envio').first().json.envio_id] }}"
+        }
+      },
+      "id": "0f829bfc-c761-4fcd-b97e-53692973af46",
+      "name": "Apagar documento",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1792,
+        -256
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Normalizar entrada').first().json.arquivo_url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "arquivo"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "66aab5a9-3b0e-4b88-99c7-7cb3ef751caa",
+      "name": "Baixar arquivo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1792,
+        -64
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepara o arquivo para o leitor: uma chave só, com nome e tipo certos.\n// O tipo vem da extensão, porque o Storage pode devolver application/octet-stream.\nconst pedido = $('Normalizar entrada').first().json;\nconst origem = pedido.canal === 'painel' ? $input.first().binary : $('Formulário: enviar documento').first().binary;\nconst chave = Object.keys(origem || {})[0];\nif (!chave) return [{ json: { aceito: false, erro_envio: 'O arquivo não chegou ao n8n.' } }];\nconst TIPOS = {\n  pdf: 'application/pdf',\n  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',\n  txt: 'text/plain',\n  md: 'text/plain',\n};\nconst arquivo = { ...origem[chave], fileName: pedido.arquivo_nome || origem[chave].fileName, fileExtension: pedido.extensao, mimeType: TIPOS[pedido.extensao] };\nreturn [{ json: { aceito: true }, binary: { arquivo } }];"
+      },
+      "id": "aa55b794-d1f8-4ce0-9733-6495b5bd56f2",
+      "name": "Conferir arquivo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Resposta para o painel quando o envio nem chega a ser registrado.\nconst pedido = $('Normalizar entrada').first().json;\nlet http_status = 400;\nlet erros = pedido.erros || [];\nif (pedido.ok) {\n  const r = $input.first().json;\n  http_status = 409;\n  erros = ['Já existe um envio deste documento em processamento (envio #' + r.envio_em_andamento + '). Aguarde ele terminar.'];\n}\nreturn [{ json: { canal: pedido.canal, http_status, resposta: { ok: false, erros } } }];"
+      },
+      "id": "d5d20c9f-5b83-4949-b110-e8471252e926",
+      "name": "Montar resposta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.canal === \"painel\" }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "93522c1e-f0cb-48d7-b5d0-cf11c0f98acf",
+      "name": "Responder ao painel?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1344,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.resposta) }}",
+        "options": {
+          "responseCode": "={{ $json.http_status }}"
+        }
+      },
+      "id": "0c007ff8-b3cf-406a-8fd0-f4c238439ce2",
+      "name": "Responder erro ao painel",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1568,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.aceito === true }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "966fea19-0a86-458b-abf4-ccf2c3782c1e",
+      "name": "Arquivo aceito?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2224,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH doc AS (\n  INSERT INTO documentos (titulo, origem) VALUES ($1, NULLIF($2, ''))\n  ON CONFLICT (titulo) DO UPDATE SET titulo = EXCLUDED.titulo\n  RETURNING id, versao, titulo, (xmax = 0) AS novo\n)\nSELECT id::text AS documento_id, titulo, novo,\n       (CASE WHEN novo THEN COALESCE(versao, 1) ELSE COALESCE(versao, 0) + 1 END)::text AS nova_versao\nFROM doc;",
+        "options": {
+          "queryReplacement": "={{ [$('Normalizar entrada').first().json.titulo, $('Normalizar entrada').first().json.origem] }}"
+        }
+      },
+      "id": "1eaea628-6c82-4270-b303-093219c44154",
+      "name": "Registrar documento",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2448,
+        32
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "jsCode": "// A saída do Postgres perde o arquivo: ele volta aqui, com os dados que o leitor põe no metadata.\nconst doc = $input.first().json;\nreturn [{\n  json: { documento_id: String(doc.documento_id), titulo: doc.titulo, versao: String(doc.nova_versao) },\n  binary: $('Conferir arquivo').first().binary,\n}];"
+      },
+      "id": "010c0287-49c1-4e27-b3fa-c7a7c2871a8f",
+      "name": "Anexar arquivo ao documento",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        32
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "tableName": {
+          "__rl": true,
+          "mode": "id",
+          "value": "trechos_documentos"
+        },
+        "options": {
+          "queryName": "match_trechos_documentos"
+        }
+      },
+      "id": "af0a48f3-1abb-48c0-bbda-9bc864acef18",
+      "name": "Gravar trechos na base",
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreSupabase",
+      "typeVersion": 1.3,
+      "position": [
+        2880,
+        32
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "edebb731-bf33-4739-99b9-2262cb0aa049",
+      "name": "Embeddings OpenAI (ingestão)",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        2800,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "dataType": "binary",
+        "textSplittingMode": "custom",
+        "options": {
+          "metadata": {
+            "metadataValues": [
+              {
+                "name": "documento_id",
+                "value": "={{ $json.documento_id }}"
+              },
+              {
+                "name": "titulo",
+                "value": "={{ $json.titulo }}"
+              },
+              {
+                "name": "versao",
+                "value": "={{ $json.versao }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "3697d182-c1f2-4ca0-8cfa-931ea027d902",
+      "name": "Ler documento",
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        2992,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "chunkOverlap": 200,
+        "options": {}
+      },
+      "id": "41a44322-6238-4bf3-a567-340d9ad4b9c4",
+      "name": "Dividir em trechos",
+      "type": "@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter",
+      "typeVersion": 1,
+      "position": [
+        2992,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Junta os caminhos de erro (download, arquivo recusado, gravação, sem texto) numa mensagem só,\n// com o que é preciso para desfazer a versão nova, se ela chegou a ser gravada.\nconst j = $input.first()?.json ?? {};\nconst e = j.error;\nconst detalhe = typeof e === 'string' ? e : (e && (e.message || e.description)) || '';\nconst motivo = j.erro_envio || ('Falha ao processar o arquivo' + (detalhe ? ': ' + detalhe : '.'));\nconst doc = $('Registrar documento').isExecuted ? $('Registrar documento').first().json : null;\nreturn [{ json: {\n  erro_envio: String(motivo).slice(0, 500),\n  documento_id: doc ? String(doc.documento_id) : '',\n  nova_versao: doc ? String(doc.nova_versao) : '',\n  novo: doc ? doc.novo === true : false,\n} }];"
+      },
+      "id": "627eccef-f67b-44cf-b9a0-e40452a56774",
+      "name": "Motivo do erro",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3552,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT count(*) FILTER (WHERE length(btrim(content)) >= 20)::int AS com_texto,\n       count(*)::int AS trechos,\n       (SELECT left(string_agg(x.content, E'\\n\\n'), 600)\n          FROM (SELECT content FROM trechos_documentos\n                WHERE metadata->>'documento_id' = $1 AND metadata->>'versao' = $2 AND length(btrim(content)) >= 20\n                ORDER BY id LIMIT 3) x) AS previa,\n       CASE WHEN count(*) FILTER (WHERE length(btrim(content)) >= 20) = 0\n            THEN 'O arquivo não tem texto legível. Se for um PDF escaneado, envie uma versão com texto selecionável.' END AS erro_envio\nFROM trechos_documentos\nWHERE metadata->>'documento_id' = $1 AND metadata->>'versao' = $2;",
+        "options": {
+          "queryReplacement": "={{ [$('Anexar arquivo ao documento').first().json.documento_id, $('Anexar arquivo ao documento').first().json.versao] }}"
+        }
+      },
+      "id": "402cb3bf-3b7e-4621-924d-9322db634271",
+      "name": "Conferir trechos",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3104,
+        -64
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ Number($json.com_texto) > 0 }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "043069f9-31de-4050-bb4a-332d176d8118",
+      "name": "Tem texto?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3328,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH doc AS (\n  UPDATE documentos SET versao = $2::text::int, atualizado_em = now(), origem = COALESCE(NULLIF($3, ''), origem)\n  WHERE id::text = $1\n  RETURNING id\n), antigos AS (\n  -- Só agora a versão anterior sai da base.\n  DELETE FROM trechos_documentos\n  WHERE metadata->>'documento_id' = $1 AND metadata->>'versao' IS DISTINCT FROM $2::text\n  RETURNING 1\n)\nUPDATE documentos_envios\nSET status = 'pronto', documento_id = $1, versao = $2::text::int, trechos = $4::int, previa = NULLIF($5, ''), erro = NULL, concluido_em = now()\nWHERE id = $6::bigint\nRETURNING id AS envio_id, (SELECT count(*) FROM antigos)::int AS trechos_antigos_removidos, (SELECT count(*) FROM doc)::int AS documento_atualizado;",
+        "options": {
+          "queryReplacement": "={{ [$('Anexar arquivo ao documento').first().json.documento_id, $('Anexar arquivo ao documento').first().json.versao, $('Normalizar entrada').first().json.origem, $json.trechos, $json.previa || \"\", $('Registrar envio').first().json.envio_id] }}"
+        }
+      },
+      "id": "35609a8e-8433-401d-b347-f93709f568fe",
+      "name": "Publicar versão nova",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3552,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH apagados AS (\n  -- Desfaz só a versão nova; a anterior continua valendo.\n  DELETE FROM trechos_documentos\n  WHERE $2 <> '' AND metadata->>'documento_id' = $2 AND metadata->>'versao' = $3\n  RETURNING 1\n), doc AS (\n  -- Documento criado agora e sem nenhum trecho: sai também.\n  DELETE FROM documentos d\n  WHERE $4::boolean AND $2 <> '' AND d.id::text = $2\n    AND NOT EXISTS (SELECT 1 FROM trechos_documentos t WHERE t.metadata->>'documento_id' = $2 AND t.metadata->>'versao' IS DISTINCT FROM $3)\n  RETURNING 1\n)\nUPDATE documentos_envios\nSET status = 'erro', erro = $5, concluido_em = now()\nWHERE id = $1::bigint\nRETURNING id AS envio_id, status, erro, (SELECT count(*) FROM apagados)::int AS trechos_desfeitos, (SELECT count(*) FROM doc)::int AS documento_removido;",
+        "options": {
+          "queryReplacement": "={{ [$('Registrar envio').first().json.envio_id, $json.documento_id, $json.nova_versao, $json.novo, $json.erro_envio] }}"
+        }
+      },
+      "id": "51c40578-597f-4096-b742-fe722a988f03",
+      "name": "Marcar erro no envio",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3760,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Base de conhecimento do Concierge (RAG)\nDuas entradas, a mesma ingestão:\n- **Formulário** (login do n8n): /form/concierge-base-conhecimento\n- **Webhook do painel**: POST /webhook/concierge-base-conhecimento-painel, header x-painel-token (credencial Header Auth). Corpo { acao: \"adicionar\", titulo, arquivo_url (link assinado do Storage do Supabase), arquivo_nome, origem?, enviado_por } ou { acao: \"apagar\", documento_id, titulo?, enviado_por }. Responde 202 com envio_id; a situação fica em documentos_envios.\n\nMesmo título = nova versão. A versão nova é gravada e conferida antes de a anterior sair: se falhar ou vier sem texto (PDF escaneado), a anterior continua valendo. Embeddings: o mesmo modelo da busca do agente (text-embedding-3-small).",
+        "height": 340,
+        "width": 1100,
+        "color": 6
+      },
+      "id": "fbc3a1a3-eba3-47b2-a2ec-3f5b650999d9",
+      "name": "Nota - Base de conhecimento",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -464
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: painel": {
+      "main": [
+        [
+          {
+            "node": "Normalizar entrada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar entrada": {
+      "main": [
+        [
+          {
+            "node": "Pedido válido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formulário: enviar documento": {
+      "main": [
+        [
+          {
+            "node": "Normalizar entrada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pedido válido?": {
+      "main": [
+        [
+          {
+            "node": "Registrar envio",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Montar resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar envio": {
+      "main": [
+        [
+          {
+            "node": "Envio registrado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Envio registrado?": {
+      "main": [
+        [
+          {
+            "node": "Veio do painel?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Montar resposta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Veio do painel?": {
+      "main": [
+        [
+          {
+            "node": "Responder ao painel",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Conferir arquivo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Responder ao painel": {
+      "main": [
+        [
+          {
+            "node": "Apagar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apagar?": {
+      "main": [
+        [
+          {
+            "node": "Apagar documento",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Baixar arquivo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Baixar arquivo": {
+      "main": [
+        [
+          {
+            "node": "Conferir arquivo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Motivo do erro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conferir arquivo": {
+      "main": [
+        [
+          {
+            "node": "Arquivo aceito?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar resposta": {
+      "main": [
+        [
+          {
+            "node": "Responder ao painel?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Responder ao painel?": {
+      "main": [
+        [
+          {
+            "node": "Responder erro ao painel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Arquivo aceito?": {
+      "main": [
+        [
+          {
+            "node": "Registrar documento",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Motivo do erro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar documento": {
+      "main": [
+        [
+          {
+            "node": "Anexar arquivo ao documento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anexar arquivo ao documento": {
+      "main": [
+        [
+          {
+            "node": "Gravar trechos na base",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gravar trechos na base": {
+      "main": [
+        [
+          {
+            "node": "Conferir trechos",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Motivo do erro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI (ingestão)": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Gravar trechos na base",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler documento": {
+      "ai_document": [
+        [
+          {
+            "node": "Gravar trechos na base",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dividir em trechos": {
+      "ai_textSplitter": [
+        [
+          {
+            "node": "Ler documento",
+            "type": "ai_textSplitter",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Motivo do erro": {
+      "main": [
+        [
+          {
+            "node": "Marcar erro no envio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conferir trechos": {
+      "main": [
+        [
+          {
+            "node": "Tem texto?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tem texto?": {
+      "main": [
+        [
+          {
+            "node": "Publicar versão nova",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Motivo do erro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Sao_Paulo",
+    "binaryMode": "separate"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
