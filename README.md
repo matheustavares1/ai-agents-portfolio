@@ -8,12 +8,12 @@ Desenvolvedor e fundador da **[Bridg AI](https://www.bridgai.com.br)**. Construo
 
 ## Projetos
 
-### 🤖 [Agente concierge com IA + painel de operação](./01-agente-concierge)
-Agente no WhatsApp para os clientes premium de uma corretora de investimentos. Ele só conversa com quem é cliente, responde pela base de conhecimento (RAG), conhece o histórico de cada cliente e passa os pedidos para a equipe pelo WhatsApp em poucos minutos. Inclui campanhas pela API oficial da Meta, com freio por falhas e por gasto, e um painel web em que a equipe acompanha conversas e pedidos, cria campanhas e edita o prompt do agente. São 9 workflows, todos publicados aqui.
+### 🤖 [VOGA Concierge: agente com IA + painel de operação](./01-agente-concierge)
+Agente no WhatsApp para os clientes premium da VOGA Wealth, assessoria de investimentos. Ele só conversa com quem é cliente, responde pela base de conhecimento (RAG), conhece o histórico de cada cliente e passa os pedidos para a equipe pelo WhatsApp em poucos minutos. Inclui campanhas pela API oficial da Meta, com freio por falhas e por gasto, e um painel web em que a equipe acompanha conversas e pedidos, cria campanhas e edita o prompt do agente. São 9 workflows, todos publicados aqui.
 
 `n8n` `OpenAI` `RAG` `Supabase Vector Store` `Redis` `API oficial do WhatsApp` `Next.js`
 
-<!-- TODO: miniatura do vídeo com link -->
+🎬 [Vídeo do painel em uso (79 s)](./01-agente-concierge/README.md#demo)
 
 ### 💬 [Agente de atendimento da Bridg AI](./02-agente-bridg-ai)
 O agente que atende quem chega à Bridg AI pelo WhatsApp, a qualquer hora. Entende o negócio da pessoa, mostra o que um agente faria por ela, marca a reunião de diagnóstico na agenda com Google Meet e manda o resumo do lead para mim. **Está no ar e pode ser testado pelo link acima.**

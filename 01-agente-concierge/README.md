@@ -1,16 +1,14 @@
-# Agente concierge com IA para clientes premium
+# VOGA Concierge: agente com IA para clientes premium
 
-> Agente de WhatsApp que atende os clientes premium de uma corretora de investimentos no programa de benefícios e experiências: tira dúvidas pela base de conhecimento, registra pedidos para a equipe e conversa sabendo o histórico de cada cliente. Inclui campanhas pela API oficial do WhatsApp e um painel web para a equipe operar tudo sem depender do desenvolvedor.
+> Agente de WhatsApp que atende os clientes premium da VOGA Wealth, assessoria de investimentos, no programa de benefícios e experiências: tira dúvidas pela base de conhecimento, registra pedidos para a equipe e conversa sabendo o histórico de cada cliente. Inclui campanhas pela API oficial do WhatsApp e um painel web para a equipe operar tudo sem depender do desenvolvedor.
 
-**Situação:** em implantação. O agente roda no número de teste da Meta e o painel está pronto, testado com dados fictícios. A troca para o número oficial do cliente está em andamento.
-
-<!-- TODO: Matheus confirmar se a corretora autorizou aparecer pelo nome. Até lá, o cliente fica anônimo neste repositório. -->
+**Situação:** em implantação. O agente roda no número de teste da Meta e o painel está pronto, testado com dados fictícios. A troca para o número oficial da VOGA está em andamento.
 
 ---
 
 ## Problema
 
-A corretora oferece aos clientes de alta renda um app de benefícios e experiências (eventos, reservas, parceiros). As dúvidas e os pedidos sobre o programa chegavam pelos canais da equipe, sem registro e sem horário. O cliente premium espera resposta na hora, e a equipe precisava de uma forma de receber cada pedido sem perder nenhum.
+A VOGA oferece aos clientes de alta renda um app de benefícios e experiências (eventos, reservas, parceiros). As dúvidas e os pedidos sobre o programa chegavam pelos canais da equipe, sem registro e sem horário. O cliente premium espera resposta na hora, e a equipe precisava de uma forma de receber cada pedido sem perder nenhum.
 
 <!-- TODO: Matheus revisar o texto do problema com o que o cliente relatou na descoberta (volume de mensagens, quem atendia antes, tempo de resposta). -->
 
@@ -52,7 +50,7 @@ flowchart TB
         R[("Redis<br/>deduplicação, buffer,<br/>verificação")]
     end
 
-    EQ["Equipe da corretora"] --> P["Painel web (Next.js)"]
+    EQ["Equipe da VOGA"] --> P["Painel web (Next.js)"]
     P <--> PG
     P -- "webhooks" --> N8N
 ```
@@ -190,10 +188,11 @@ O código do painel fica num repositório privado.
 
 ## Demo
 
-<!-- TODO: vídeo da plataforma (79 s). Confirmar a autorização do cliente; sem ela, desfocar nome, logo e dados. Subir no YouTube (não listado) ou no Loom e trocar este comentário por uma miniatura clicável:
-[![Vídeo do agente concierge](./assets/thumb-video.png)](LINK_DO_VIDEO) -->
+**O Concierge em 79 segundos (sem áudio).** Uma conversa no WhatsApp e, depois, a equipe usando o painel: login, pedidos, uma mensagem nova para aprovação da Meta, uma campanha, o consumo do mês e as configurações do agente. O painel está em modo demonstração, com dados fictícios.
 
-<!-- TODO: prints do canvas do n8n (assets/canvas.png) e do painel em modo demonstração (assets/painel-*.png). -->
+<!-- VÍDEO: no github.com, edite este arquivo, apague esta linha inteira e arraste aqui o arquivo voga-concierge-github.mp4. O GitHub troca pelo link do vídeo e mostra o player. -->
+
+<!-- TODO: print do canvas do n8n (assets/canvas.png). -->
 
 ---
 
@@ -219,4 +218,4 @@ Dentro de expressões do n8n, que já usam `{{ }}`, o placeholder aparece como `
 
 ## O que foi tirado destes arquivos
 
-Os workflows saíram do n8n de produção e foram sanitizados antes de entrar aqui: sem credenciais, IDs de workflow e de instância, `webhookId`, `pinData` e dados de execução; sem URLs e domínios do cliente e do servidor; sem telefones, e-mails e IDs da Meta. O nome do cliente virou "corretora", e as categorias do programa viraram Bronze, Prata, Ouro e Diamante. No filtro de vazamento, as faixas de patrimônio reais deram lugar a um padrão genérico. As notas do canvas foram revisadas para descrever a versão atual. A única URL que ficou é a da Graph API da Meta (`graph.facebook.com`), que é pública e igual para qualquer conta.
+Os workflows saíram do n8n de produção e foram sanitizados antes de entrar aqui: sem credenciais, IDs de workflow e de instância, `webhookId`, `pinData` e dados de execução; sem URLs e domínios do cliente e do servidor; sem telefones, e-mails e IDs da Meta. Nos JSONs, o nome do cliente ficou genérico ("corretora"), e as categorias do programa viraram Bronze, Prata, Ouro e Diamante. No filtro de vazamento, as faixas de patrimônio reais deram lugar a um padrão genérico. As notas do canvas foram revisadas para descrever a versão atual. A única URL que ficou é a da Graph API da Meta (`graph.facebook.com`), que é pública e igual para qualquer conta.
